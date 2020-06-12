@@ -1,0 +1,29 @@
+#更新内核
+yum -y update
+
+安装elrepo内核
+rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+rpm -Uvh http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+
+#先卸载旧的 kernel-headers，kernel-tools, kernel-tools-libs，只保留内核
+yum remove kernel-headers kernel-tools kernel-tools-libs 
+
+#这里是下载内核和驱动，如果不下载驱动，到后面bcc软件链接的文件就没有
+yum --disablerepo="*" --enablerepo="*elrepo-kernel" install kernel-ml kernel-ml-devel kernel-ml-headers kernel-ml-tools-libs kernel-ml-tools-libs-devel
+
+#把新内核设置成默认启动
+grub2-mkconfig -o /boot/grub2/grub.cfg
+rub2-set-default 0
+
+
+#安装bcc
+yum install -y bcc-tools
+
+reboot -f
+
+
+#参考
+https://www.jianshu.com/p/997e0a6d8e09
+
+
+

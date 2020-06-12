@@ -1,0 +1,2632 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="822" onload="init(evt)" viewBox="0 0 1200 822" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="822.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="805" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="805" > </text>
+<g id="frames">
+<g >
+<title>kthread (43 samples, 0.02%)</title><rect x="455.3" y="725" width="0.2" height="15.0" fill="rgb(247,119,35)" rx="2" ry="2" />
+<text  x="458.33" y="735.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (73 samples, 0.03%)</title><rect x="1177.0" y="117" width="0.3" height="15.0" fill="rgb(239,57,12)" rx="2" ry="2" />
+<text  x="1179.96" y="127.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (162 samples, 0.06%)</title><rect x="1178.3" y="133" width="0.8" height="15.0" fill="rgb(243,34,2)" rx="2" ry="2" />
+<text  x="1181.31" y="143.5" ></text>
+</g>
+<g >
+<title>ip_route_input_noref (74 samples, 0.03%)</title><rect x="130.2" y="485" width="0.3" height="15.0" fill="rgb(245,197,49)" rx="2" ry="2" />
+<text  x="133.19" y="495.5" ></text>
+</g>
+<g >
+<title>nf_nat_setup_info (109 samples, 0.04%)</title><rect x="133.2" y="357" width="0.5" height="15.0" fill="rgb(230,108,50)" rx="2" ry="2" />
+<text  x="136.19" y="367.5" ></text>
+</g>
+<g >
+<title>br_handle_frame_finish (37 samples, 0.01%)</title><rect x="1174.0" y="453" width="0.2" height="15.0" fill="rgb(245,127,37)" rx="2" ry="2" />
+<text  x="1177.03" y="463.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (58 samples, 0.02%)</title><rect x="132.4" y="389" width="0.3" height="15.0" fill="rgb(243,144,52)" rx="2" ry="2" />
+<text  x="135.43" y="399.5" ></text>
+</g>
+<g >
+<title>ip_output (415 samples, 0.17%)</title><rect x="1174.3" y="437" width="1.9" height="15.0" fill="rgb(227,100,6)" rx="2" ry="2" />
+<text  x="1177.29" y="447.5" ></text>
+</g>
+<g >
+<title>tcp_v4_route_req (51 samples, 0.02%)</title><rect x="153.5" y="341" width="0.3" height="15.0" fill="rgb(229,140,27)" rx="2" ry="2" />
+<text  x="156.54" y="351.5" ></text>
+</g>
+<g >
+<title>vmw_sou_plane_update_bo (39 samples, 0.02%)</title><rect x="455.3" y="533" width="0.2" height="15.0" fill="rgb(244,63,10)" rx="2" ry="2" />
+<text  x="458.35" y="543.5" ></text>
+</g>
+<g >
+<title>vmw_cmdbuf_header_submit (39 samples, 0.02%)</title><rect x="455.3" y="357" width="0.2" height="15.0" fill="rgb(233,164,12)" rx="2" ry="2" />
+<text  x="458.35" y="367.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (27 samples, 0.01%)</title><rect x="1174.0" y="181" width="0.2" height="15.0" fill="rgb(229,204,29)" rx="2" ry="2" />
+<text  x="1177.03" y="191.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_in (38 samples, 0.02%)</title><rect x="135.3" y="261" width="0.2" height="15.0" fill="rgb(218,24,42)" rx="2" ry="2" />
+<text  x="138.30" y="271.5" ></text>
+</g>
+<g >
+<title>main (24 samples, 0.01%)</title><rect x="455.9" y="725" width="0.1" height="15.0" fill="rgb(252,28,21)" rx="2" ry="2" />
+<text  x="458.86" y="735.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_tuple_taken (98 samples, 0.04%)</title><rect x="133.2" y="325" width="0.5" height="15.0" fill="rgb(234,125,33)" rx="2" ry="2" />
+<text  x="136.22" y="335.5" ></text>
+</g>
+<g >
+<title>tcp_conn_request (104 samples, 0.04%)</title><rect x="1176.8" y="277" width="0.5" height="15.0" fill="rgb(229,40,27)" rx="2" ry="2" />
+<text  x="1179.81" y="287.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (228 samples, 0.09%)</title><rect x="132.8" y="437" width="1.0" height="15.0" fill="rgb(249,208,35)" rx="2" ry="2" />
+<text  x="135.76" y="447.5" ></text>
+</g>
+<g >
+<title>__alloc_skb (37 samples, 0.01%)</title><rect x="448.0" y="405" width="0.2" height="15.0" fill="rgb(214,20,43)" rx="2" ry="2" />
+<text  x="451.00" y="415.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_fn (119 samples, 0.05%)</title><rect x="294.9" y="453" width="0.6" height="15.0" fill="rgb(224,108,7)" rx="2" ry="2" />
+<text  x="297.94" y="463.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_state_process (38 samples, 0.02%)</title><rect x="1176.6" y="293" width="0.1" height="15.0" fill="rgb(214,34,48)" rx="2" ry="2" />
+<text  x="1179.56" y="303.5" ></text>
+</g>
+<g >
+<title>br_handle_frame (37 samples, 0.01%)</title><rect x="1174.0" y="469" width="0.2" height="15.0" fill="rgb(242,221,26)" rx="2" ry="2" />
+<text  x="1177.03" y="479.5" ></text>
+</g>
+<g >
+<title>inet_csk_route_req (51 samples, 0.02%)</title><rect x="153.5" y="325" width="0.3" height="15.0" fill="rgb(243,74,14)" rx="2" ry="2" />
+<text  x="156.54" y="335.5" ></text>
+</g>
+<g >
+<title>tcp_rtx_synack (1,344 samples, 0.54%)</title><rect x="448.8" y="613" width="6.3" height="15.0" fill="rgb(251,32,3)" rx="2" ry="2" />
+<text  x="451.79" y="623.5" ></text>
+</g>
+<g >
+<title>vmw_fifo_commit_flush (39 samples, 0.02%)</title><rect x="455.3" y="453" width="0.2" height="15.0" fill="rgb(227,153,30)" rx="2" ry="2" />
+<text  x="458.35" y="463.5" ></text>
+</g>
+<g >
+<title>__br_forward (42 samples, 0.02%)</title><rect x="132.5" y="293" width="0.2" height="15.0" fill="rgb(225,142,15)" rx="2" ry="2" />
+<text  x="135.48" y="303.5" ></text>
+</g>
+<g >
+<title>ipv4_conntrack_in (119 samples, 0.05%)</title><rect x="444.7" y="437" width="0.6" height="15.0" fill="rgb(223,131,45)" rx="2" ry="2" />
+<text  x="447.71" y="447.5" ></text>
+</g>
+<g >
+<title>ip_sublist_rcv_finish (43 samples, 0.02%)</title><rect x="1176.5" y="389" width="0.2" height="15.0" fill="rgb(254,226,11)" rx="2" ry="2" />
+<text  x="1179.54" y="399.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (10,337 samples, 4.14%)</title><rect x="394.4" y="325" width="48.8" height="15.0" fill="rgb(222,229,52)" rx="2" ry="2" />
+<text  x="397.41" y="335.5" >dev_..</text>
+</g>
+<g >
+<title>gro_normal_one (44 samples, 0.02%)</title><rect x="1176.5" y="485" width="0.2" height="15.0" fill="rgb(210,15,34)" rx="2" ry="2" />
+<text  x="1179.54" y="495.5" ></text>
+</g>
+<g >
+<title>ip_output (367 samples, 0.15%)</title><rect x="1177.3" y="293" width="1.8" height="15.0" fill="rgb(237,221,46)" rx="2" ry="2" />
+<text  x="1180.34" y="303.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (27 samples, 0.01%)</title><rect x="1174.0" y="213" width="0.2" height="15.0" fill="rgb(238,130,15)" rx="2" ry="2" />
+<text  x="1177.03" y="223.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (18,925 samples, 7.57%)</title><rect x="155.7" y="149" width="89.4" height="15.0" fill="rgb(244,36,28)" rx="2" ry="2" />
+<text  x="158.74" y="159.5" >e1000_xmit..</text>
+</g>
+<g >
+<title>__vmw_cmdbuf_cur_flush (39 samples, 0.02%)</title><rect x="455.3" y="421" width="0.2" height="15.0" fill="rgb(251,43,4)" rx="2" ry="2" />
+<text  x="458.35" y="431.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_list_core (35,145 samples, 14.07%)</title><rect x="129.6" y="549" width="166.0" height="15.0" fill="rgb(210,4,43)" rx="2" ry="2" />
+<text  x="132.58" y="559.5" >__netif_receive_skb_l..</text>
+</g>
+<g >
+<title>__qdisc_run (386 samples, 0.15%)</title><rect x="453.3" y="437" width="1.8" height="15.0" fill="rgb(228,172,2)" rx="2" ry="2" />
+<text  x="456.28" y="447.5" ></text>
+</g>
+<g >
+<title>tcp_v4_route_req (52 samples, 0.02%)</title><rect x="447.2" y="437" width="0.2" height="15.0" fill="rgb(250,226,40)" rx="2" ry="2" />
+<text  x="450.19" y="447.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish (369 samples, 0.15%)</title><rect x="1177.3" y="341" width="1.8" height="15.0" fill="rgb(231,178,25)" rx="2" ry="2" />
+<text  x="1180.34" y="351.5" ></text>
+</g>
+<g >
+<title>[dockerd-current] (23 samples, 0.01%)</title><rect x="10.2" y="677" width="0.1" height="15.0" fill="rgb(245,7,36)" rx="2" ry="2" />
+<text  x="13.22" y="687.5" ></text>
+</g>
+<g >
+<title>x86_64_start_reservations (2,290 samples, 0.92%)</title><rect x="1179.2" y="709" width="10.8" height="15.0" fill="rgb(247,208,17)" rx="2" ry="2" />
+<text  x="1182.18" y="719.5" ></text>
+</g>
+<g >
+<title>br_dev_xmit (48 samples, 0.02%)</title><rect x="132.5" y="325" width="0.2" height="15.0" fill="rgb(214,193,31)" rx="2" ry="2" />
+<text  x="135.46" y="335.5" ></text>
+</g>
+<g >
+<title>smp_apic_timer_interrupt (490 samples, 0.20%)</title><rect x="1174.0" y="597" width="2.3" height="15.0" fill="rgb(212,12,32)" rx="2" ry="2" />
+<text  x="1177.01" y="607.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (387 samples, 0.15%)</title><rect x="453.3" y="453" width="1.8" height="15.0" fill="rgb(226,177,33)" rx="2" ry="2" />
+<text  x="456.28" y="463.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (371 samples, 0.15%)</title><rect x="1177.3" y="373" width="1.8" height="15.0" fill="rgb(235,118,1)" rx="2" ry="2" />
+<text  x="1180.34" y="383.5" ></text>
+</g>
+<g >
+<title>security_inet_conn_request (82 samples, 0.03%)</title><rect x="153.0" y="341" width="0.4" height="15.0" fill="rgb(237,112,8)" rx="2" ry="2" />
+<text  x="156.02" y="351.5" ></text>
+</g>
+<g >
+<title>gro_normal_list.part.136 (123 samples, 0.05%)</title><rect x="1176.7" y="501" width="0.6" height="15.0" fill="rgb(252,62,2)" rx="2" ry="2" />
+<text  x="1179.75" y="511.5" ></text>
+</g>
+<g >
+<title>selinux_inet_conn_request (81 samples, 0.03%)</title><rect x="153.0" y="325" width="0.4" height="15.0" fill="rgb(238,19,35)" rx="2" ry="2" />
+<text  x="156.02" y="335.5" ></text>
+</g>
+<g >
+<title>ip_sublist_rcv_finish (114 samples, 0.05%)</title><rect x="1176.8" y="421" width="0.5" height="15.0" fill="rgb(234,52,8)" rx="2" ry="2" />
+<text  x="1179.76" y="431.5" ></text>
+</g>
+<g >
+<title>perf (24 samples, 0.01%)</title><rect x="455.9" y="757" width="0.1" height="15.0" fill="rgb(227,218,28)" rx="2" ry="2" />
+<text  x="458.86" y="767.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (32 samples, 0.01%)</title><rect x="10.0" y="581" width="0.2" height="15.0" fill="rgb(237,74,34)" rx="2" ry="2" />
+<text  x="13.01" y="591.5" ></text>
+</g>
+<g >
+<title>vmw_sou_primary_plane_atomic_update (40 samples, 0.02%)</title><rect x="455.3" y="549" width="0.2" height="15.0" fill="rgb(229,134,35)" rx="2" ry="2" />
+<text  x="458.34" y="559.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_out (36 samples, 0.01%)</title><rect x="443.4" y="373" width="0.1" height="15.0" fill="rgb(210,142,27)" rx="2" ry="2" />
+<text  x="446.38" y="383.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (328 samples, 0.13%)</title><rect x="1174.7" y="341" width="1.5" height="15.0" fill="rgb(240,155,18)" rx="2" ry="2" />
+<text  x="1177.69" y="351.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (1,122 samples, 0.45%)</title><rect x="146.9" y="165" width="5.3" height="15.0" fill="rgb(231,122,18)" rx="2" ry="2" />
+<text  x="149.89" y="175.5" ></text>
+</g>
+<g >
+<title>ip_build_and_send_pkt (28,871 samples, 11.56%)</title><rect x="153.8" y="325" width="136.3" height="15.0" fill="rgb(232,110,16)" rx="2" ry="2" />
+<text  x="156.79" y="335.5" >ip_build_and_send..</text>
+</g>
+<g >
+<title>cpu_startup_entry (2,290 samples, 0.92%)</title><rect x="1179.2" y="645" width="10.8" height="15.0" fill="rgb(235,134,24)" rx="2" ry="2" />
+<text  x="1182.18" y="655.5" ></text>
+</g>
+<g >
+<title>worker_thread (24 samples, 0.01%)</title><rect x="455.7" y="709" width="0.1" height="15.0" fill="rgb(230,212,6)" rx="2" ry="2" />
+<text  x="458.69" y="719.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (28,480 samples, 11.40%)</title><rect x="155.5" y="277" width="134.5" height="15.0" fill="rgb(221,2,43)" rx="2" ry="2" />
+<text  x="158.46" y="287.5" >ip_finish_output</text>
+</g>
+<g >
+<title>ip_local_deliver_finish (109 samples, 0.04%)</title><rect x="1176.8" y="389" width="0.5" height="15.0" fill="rgb(235,132,46)" rx="2" ry="2" />
+<text  x="1179.79" y="399.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_core (372 samples, 0.15%)</title><rect x="1177.3" y="485" width="1.8" height="15.0" fill="rgb(228,123,32)" rx="2" ry="2" />
+<text  x="1180.33" y="495.5" ></text>
+</g>
+<g >
+<title>ip_rcv (628 samples, 0.25%)</title><rect x="445.8" y="597" width="3.0" height="15.0" fill="rgb(228,61,28)" rx="2" ry="2" />
+<text  x="448.79" y="607.5" ></text>
+</g>
+<g >
+<title>ebitmap_netlbl_export (28 samples, 0.01%)</title><rect x="446.9" y="357" width="0.1" height="15.0" fill="rgb(239,105,52)" rx="2" ry="2" />
+<text  x="449.90" y="367.5" ></text>
+</g>
+<g >
+<title>ip_build_and_send_pkt (37 samples, 0.01%)</title><rect x="1176.6" y="213" width="0.1" height="15.0" fill="rgb(243,9,0)" rx="2" ry="2" />
+<text  x="1179.56" y="223.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (387 samples, 0.15%)</title><rect x="453.3" y="485" width="1.8" height="15.0" fill="rgb(226,130,13)" rx="2" ry="2" />
+<text  x="456.28" y="495.5" ></text>
+</g>
+<g >
+<title>run_ksoftirqd (94,182 samples, 37.69%)</title><rect x="10.5" y="693" width="444.8" height="15.0" fill="rgb(232,169,18)" rx="2" ry="2" />
+<text  x="13.49" y="703.5" >run_ksoftirqd</text>
+</g>
+<g >
+<title>ip_local_deliver_finish (517 samples, 0.21%)</title><rect x="445.9" y="549" width="2.4" height="15.0" fill="rgb(251,73,48)" rx="2" ry="2" />
+<text  x="448.89" y="559.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (328 samples, 0.13%)</title><rect x="1174.7" y="357" width="1.5" height="15.0" fill="rgb(253,95,47)" rx="2" ry="2" />
+<text  x="1177.69" y="367.5" ></text>
+</g>
+<g >
+<title>process_backlog (32,354 samples, 12.95%)</title><rect x="296.0" y="645" width="152.8" height="15.0" fill="rgb(232,61,41)" rx="2" ry="2" />
+<text  x="298.96" y="655.5" >process_backlog</text>
+</g>
+<g >
+<title>e1000_xmit_frame (73 samples, 0.03%)</title><rect x="1177.0" y="53" width="0.3" height="15.0" fill="rgb(218,159,51)" rx="2" ry="2" />
+<text  x="1179.96" y="63.5" ></text>
+</g>
+<g >
+<title>fib_table_lookup (22 samples, 0.01%)</title><rect x="443.9" y="373" width="0.1" height="15.0" fill="rgb(210,210,30)" rx="2" ry="2" />
+<text  x="446.94" y="383.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (1,296 samples, 0.52%)</title><rect x="449.0" y="533" width="6.1" height="15.0" fill="rgb(222,138,18)" rx="2" ry="2" />
+<text  x="451.98" y="543.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (40 samples, 0.02%)</title><rect x="10.0" y="645" width="0.2" height="15.0" fill="rgb(233,18,4)" rx="2" ry="2" />
+<text  x="13.01" y="655.5" ></text>
+</g>
+<g >
+<title>vmw_du_helper_plane_update (39 samples, 0.02%)</title><rect x="455.3" y="517" width="0.2" height="15.0" fill="rgb(243,182,20)" rx="2" ry="2" />
+<text  x="458.35" y="527.5" ></text>
+</g>
+<g >
+<title>tcp_conn_request (397 samples, 0.16%)</title><rect x="446.4" y="453" width="1.8" height="15.0" fill="rgb(226,72,19)" rx="2" ry="2" />
+<text  x="449.37" y="463.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (18,999 samples, 7.60%)</title><rect x="155.5" y="229" width="89.7" height="15.0" fill="rgb(252,103,17)" rx="2" ry="2" />
+<text  x="158.51" y="239.5" >dev_queue_..</text>
+</g>
+<g >
+<title>tcp_rcv_state_process (104 samples, 0.04%)</title><rect x="1176.8" y="325" width="0.5" height="15.0" fill="rgb(252,8,32)" rx="2" ry="2" />
+<text  x="1179.81" y="335.5" ></text>
+</g>
+<g >
+<title>ipt_do_table (99 samples, 0.04%)</title><rect x="291.7" y="453" width="0.5" height="15.0" fill="rgb(213,89,26)" rx="2" ry="2" />
+<text  x="294.73" y="463.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_fn (33 samples, 0.01%)</title><rect x="152.3" y="261" width="0.1" height="15.0" fill="rgb(241,143,52)" rx="2" ry="2" />
+<text  x="155.26" y="271.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (85 samples, 0.03%)</title><rect x="1174.3" y="325" width="0.4" height="15.0" fill="rgb(227,165,6)" rx="2" ry="2" />
+<text  x="1177.29" y="335.5" ></text>
+</g>
+<g >
+<title>br_pass_frame_up (37 samples, 0.01%)</title><rect x="1174.0" y="437" width="0.2" height="15.0" fill="rgb(243,11,50)" rx="2" ry="2" />
+<text  x="1177.03" y="447.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (358 samples, 0.14%)</title><rect x="131.0" y="405" width="1.7" height="15.0" fill="rgb(232,172,6)" rx="2" ry="2" />
+<text  x="134.01" y="415.5" ></text>
+</g>
+<g >
+<title>selinux_inet_conn_request (88 samples, 0.04%)</title><rect x="446.7" y="421" width="0.4" height="15.0" fill="rgb(219,194,36)" rx="2" ry="2" />
+<text  x="449.67" y="431.5" ></text>
+</g>
+<g >
+<title>sk_filter_trim_cap (22 samples, 0.01%)</title><rect x="135.0" y="421" width="0.1" height="15.0" fill="rgb(249,113,53)" rx="2" ry="2" />
+<text  x="138.02" y="431.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (328 samples, 0.13%)</title><rect x="1174.7" y="293" width="1.5" height="15.0" fill="rgb(239,35,10)" rx="2" ry="2" />
+<text  x="1177.69" y="303.5" ></text>
+</g>
+<g >
+<title>ip_output (28,522 samples, 11.42%)</title><rect x="155.4" y="293" width="134.7" height="15.0" fill="rgb(221,156,10)" rx="2" ry="2" />
+<text  x="158.43" y="303.5" >ip_output</text>
+</g>
+<g >
+<title>ebt_nat_in (26 samples, 0.01%)</title><rect x="445.6" y="565" width="0.1" height="15.0" fill="rgb(215,105,14)" rx="2" ry="2" />
+<text  x="448.60" y="575.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_core (37 samples, 0.01%)</title><rect x="1174.0" y="485" width="0.2" height="15.0" fill="rgb(241,195,23)" rx="2" ry="2" />
+<text  x="1177.03" y="495.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (23 samples, 0.01%)</title><rect x="1176.6" y="69" width="0.1" height="15.0" fill="rgb(254,130,17)" rx="2" ry="2" />
+<text  x="1179.56" y="79.5" ></text>
+</g>
+<g >
+<title>ret_from_fork (24 samples, 0.01%)</title><rect x="455.7" y="741" width="0.1" height="15.0" fill="rgb(230,161,54)" rx="2" ry="2" />
+<text  x="458.69" y="751.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (385 samples, 0.15%)</title><rect x="453.3" y="389" width="1.8" height="15.0" fill="rgb(246,161,27)" rx="2" ry="2" />
+<text  x="456.28" y="399.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (904 samples, 0.36%)</title><rect x="449.0" y="469" width="4.3" height="15.0" fill="rgb(231,26,14)" rx="2" ry="2" />
+<text  x="452.01" y="479.5" ></text>
+</g>
+<g >
+<title>iptable_raw_hook (99 samples, 0.04%)</title><rect x="291.7" y="469" width="0.5" height="15.0" fill="rgb(240,117,15)" rx="2" ry="2" />
+<text  x="294.73" y="479.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (9,468 samples, 3.79%)</title><rect x="245.2" y="229" width="44.8" height="15.0" fill="rgb(229,120,51)" rx="2" ry="2" />
+<text  x="248.24" y="239.5" >neig..</text>
+</g>
+<g >
+<title>ipv4_confirm (43 samples, 0.02%)</title><rect x="132.9" y="421" width="0.2" height="15.0" fill="rgb(205,43,38)" rx="2" ry="2" />
+<text  x="135.90" y="431.5" ></text>
+</g>
+<g >
+<title>nf_ct_seq_offset (29 samples, 0.01%)</title><rect x="294.7" y="405" width="0.2" height="15.0" fill="rgb(210,79,16)" rx="2" ry="2" />
+<text  x="297.73" y="415.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (108 samples, 0.04%)</title><rect x="1176.8" y="357" width="0.5" height="15.0" fill="rgb(230,2,25)" rx="2" ry="2" />
+<text  x="1179.79" y="367.5" ></text>
+</g>
+<g >
+<title>drm_atomic_helper_commit_planes (40 samples, 0.02%)</title><rect x="455.3" y="565" width="0.2" height="15.0" fill="rgb(222,157,40)" rx="2" ry="2" />
+<text  x="458.34" y="575.5" ></text>
+</g>
+<g >
+<title>skb_release_data (24 samples, 0.01%)</title><rect x="295.7" y="565" width="0.1" height="15.0" fill="rgb(226,225,49)" rx="2" ry="2" />
+<text  x="298.65" y="575.5" ></text>
+</g>
+<g >
+<title>commit_tail (41 samples, 0.02%)</title><rect x="455.3" y="597" width="0.2" height="15.0" fill="rgb(222,133,49)" rx="2" ry="2" />
+<text  x="458.34" y="607.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish (616 samples, 0.25%)</title><rect x="445.9" y="581" width="2.9" height="15.0" fill="rgb(227,168,38)" rx="2" ry="2" />
+<text  x="448.85" y="591.5" ></text>
+</g>
+<g >
+<title>netif_receive_skb_list_internal (35,160 samples, 14.07%)</title><rect x="129.5" y="565" width="166.1" height="15.0" fill="rgb(230,195,33)" rx="2" ry="2" />
+<text  x="132.51" y="575.5" >netif_receive_skb_lis..</text>
+</g>
+<g >
+<title>__netif_receive_skb_core (50 samples, 0.02%)</title><rect x="129.6" y="533" width="0.3" height="15.0" fill="rgb(240,190,46)" rx="2" ry="2" />
+<text  x="132.63" y="543.5" ></text>
+</g>
+<g >
+<title>tcp_v4_send_synack (38 samples, 0.02%)</title><rect x="1176.6" y="229" width="0.1" height="15.0" fill="rgb(248,172,0)" rx="2" ry="2" />
+<text  x="1179.56" y="239.5" ></text>
+</g>
+<g >
+<title>br_forward (207 samples, 0.08%)</title><rect x="131.4" y="325" width="0.9" height="15.0" fill="rgb(254,93,11)" rx="2" ry="2" />
+<text  x="134.37" y="335.5" ></text>
+</g>
+<g >
+<title>napi_complete_done (123 samples, 0.05%)</title><rect x="1176.7" y="517" width="0.6" height="15.0" fill="rgb(219,65,24)" rx="2" ry="2" />
+<text  x="1179.75" y="527.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (73 samples, 0.03%)</title><rect x="1177.0" y="85" width="0.3" height="15.0" fill="rgb(222,71,15)" rx="2" ry="2" />
+<text  x="1179.96" y="95.5" ></text>
+</g>
+<g >
+<title>tcp_conn_request (29,167 samples, 11.67%)</title><rect x="152.7" y="357" width="137.7" height="15.0" fill="rgb(238,194,13)" rx="2" ry="2" />
+<text  x="155.65" y="367.5" >tcp_conn_request</text>
+</g>
+<g >
+<title>tcp_v4_send_synack (28,927 samples, 11.58%)</title><rect x="153.8" y="341" width="136.6" height="15.0" fill="rgb(234,93,43)" rx="2" ry="2" />
+<text  x="156.78" y="351.5" >tcp_v4_send_synack</text>
+</g>
+<g >
+<title>nf_hook_slow (24 samples, 0.01%)</title><rect x="445.4" y="533" width="0.1" height="15.0" fill="rgb(218,163,38)" rx="2" ry="2" />
+<text  x="448.36" y="543.5" ></text>
+</g>
+<g >
+<title>br_netif_receive_skb (371 samples, 0.15%)</title><rect x="1177.3" y="421" width="1.8" height="15.0" fill="rgb(227,168,14)" rx="2" ry="2" />
+<text  x="1180.34" y="431.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (217 samples, 0.09%)</title><rect x="444.3" y="453" width="1.0" height="15.0" fill="rgb(222,58,12)" rx="2" ry="2" />
+<text  x="447.28" y="463.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (204 samples, 0.08%)</title><rect x="1177.3" y="213" width="1.0" height="15.0" fill="rgb(240,81,23)" rx="2" ry="2" />
+<text  x="1180.34" y="223.5" ></text>
+</g>
+<g >
+<title>ip_push_pending_frames (3,643 samples, 1.46%)</title><rect x="135.2" y="357" width="17.2" height="15.0" fill="rgb(220,91,11)" rx="2" ry="2" />
+<text  x="138.24" y="367.5" ></text>
+</g>
+<g >
+<title>br_handle_frame (372 samples, 0.15%)</title><rect x="1177.3" y="469" width="1.8" height="15.0" fill="rgb(237,185,22)" rx="2" ry="2" />
+<text  x="1180.33" y="479.5" ></text>
+</g>
+<g >
+<title>ip_list_rcv (44 samples, 0.02%)</title><rect x="1176.5" y="421" width="0.2" height="15.0" fill="rgb(230,129,21)" rx="2" ry="2" />
+<text  x="1179.54" y="431.5" ></text>
+</g>
+<g >
+<title>security_netlbl_sid_to_secattr (46 samples, 0.02%)</title><rect x="446.8" y="389" width="0.3" height="15.0" fill="rgb(254,71,41)" rx="2" ry="2" />
+<text  x="449.83" y="399.5" ></text>
+</g>
+<g >
+<title>ip_sublist_rcv (44 samples, 0.02%)</title><rect x="1176.5" y="405" width="0.2" height="15.0" fill="rgb(224,134,2)" rx="2" ry="2" />
+<text  x="1179.54" y="415.5" ></text>
+</g>
+<g >
+<title>ip_forward_finish (37 samples, 0.01%)</title><rect x="1174.0" y="309" width="0.2" height="15.0" fill="rgb(217,7,52)" rx="2" ry="2" />
+<text  x="1177.03" y="319.5" ></text>
+</g>
+<g >
+<title>iptable_mangle_hook (40 samples, 0.02%)</title><rect x="444.3" y="437" width="0.2" height="15.0" fill="rgb(247,84,3)" rx="2" ry="2" />
+<text  x="447.31" y="447.5" ></text>
+</g>
+<g >
+<title>ip_route_input_slow (73 samples, 0.03%)</title><rect x="130.2" y="453" width="0.3" height="15.0" fill="rgb(221,84,26)" rx="2" ry="2" />
+<text  x="133.20" y="463.5" ></text>
+</g>
+<g >
+<title>tcp_in_window (34 samples, 0.01%)</title><rect x="294.7" y="421" width="0.2" height="15.0" fill="rgb(253,129,5)" rx="2" ry="2" />
+<text  x="297.70" y="431.5" ></text>
+</g>
+<g >
+<title>kworker/2:0-eve (43 samples, 0.02%)</title><rect x="455.3" y="757" width="0.2" height="15.0" fill="rgb(250,204,18)" rx="2" ry="2" />
+<text  x="458.33" y="767.5" ></text>
+</g>
+<g >
+<title>e1000_clean (60,440 samples, 24.19%)</title><rect x="10.5" y="645" width="285.4" height="15.0" fill="rgb(229,85,27)" rx="2" ry="2" />
+<text  x="13.51" y="655.5" >e1000_clean</text>
+</g>
+<g >
+<title>ip_output (37 samples, 0.01%)</title><rect x="1174.0" y="293" width="0.2" height="15.0" fill="rgb(215,7,27)" rx="2" ry="2" />
+<text  x="1177.03" y="303.5" ></text>
+</g>
+<g >
+<title>mptspi_qcmd (32 samples, 0.01%)</title><rect x="455.5" y="581" width="0.2" height="15.0" fill="rgb(223,83,36)" rx="2" ry="2" />
+<text  x="458.54" y="591.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (249 samples, 0.10%)</title><rect x="131.2" y="357" width="1.2" height="15.0" fill="rgb(205,98,47)" rx="2" ry="2" />
+<text  x="134.19" y="367.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (31,023 samples, 12.42%)</title><rect x="296.7" y="357" width="146.5" height="15.0" fill="rgb(215,87,53)" rx="2" ry="2" />
+<text  x="299.72" y="367.5" >ip_finish_output2</text>
+</g>
+<g >
+<title>nf_hook_slow (23 samples, 0.01%)</title><rect x="448.9" y="533" width="0.1" height="15.0" fill="rgb(206,124,27)" rx="2" ry="2" />
+<text  x="451.87" y="543.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (27 samples, 0.01%)</title><rect x="1174.0" y="229" width="0.2" height="15.0" fill="rgb(236,91,36)" rx="2" ry="2" />
+<text  x="1177.03" y="239.5" ></text>
+</g>
+<g >
+<title>ip_local_out (104 samples, 0.04%)</title><rect x="1176.8" y="229" width="0.5" height="15.0" fill="rgb(224,183,29)" rx="2" ry="2" />
+<text  x="1179.81" y="239.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (27 samples, 0.01%)</title><rect x="1174.0" y="149" width="0.2" height="15.0" fill="rgb(228,157,14)" rx="2" ry="2" />
+<text  x="1177.03" y="159.5" ></text>
+</g>
+<g >
+<title>ip_sublist_rcv (35,058 samples, 14.03%)</title><rect x="130.0" y="517" width="165.5" height="15.0" fill="rgb(215,127,33)" rx="2" ry="2" />
+<text  x="132.96" y="527.5" >ip_sublist_rcv</text>
+</g>
+<g >
+<title>ip_route_output_key_hash (37 samples, 0.01%)</title><rect x="153.6" y="293" width="0.1" height="15.0" fill="rgb(250,95,49)" rx="2" ry="2" />
+<text  x="156.56" y="303.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (23 samples, 0.01%)</title><rect x="1176.6" y="85" width="0.1" height="15.0" fill="rgb(221,90,45)" rx="2" ry="2" />
+<text  x="1179.56" y="95.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (28,479 samples, 11.40%)</title><rect x="155.5" y="261" width="134.5" height="15.0" fill="rgb(229,188,32)" rx="2" ry="2" />
+<text  x="158.47" y="271.5" >__ip_finish_output</text>
+</g>
+<g >
+<title>uhci_hub_status_data (30 samples, 0.01%)</title><rect x="455.1" y="597" width="0.2" height="15.0" fill="rgb(223,227,19)" rx="2" ry="2" />
+<text  x="458.14" y="607.5" ></text>
+</g>
+<g >
+<title>napi_gro_receive (35,195 samples, 14.09%)</title><rect x="129.4" y="613" width="166.2" height="15.0" fill="rgb(253,145,34)" rx="2" ry="2" />
+<text  x="132.35" y="623.5" >napi_gro_receive</text>
+</g>
+<g >
+<title>ip_finish_output (37 samples, 0.01%)</title><rect x="1174.0" y="277" width="0.2" height="15.0" fill="rgb(247,37,35)" rx="2" ry="2" />
+<text  x="1177.03" y="287.5" ></text>
+</g>
+<g >
+<title>ip_sublist_rcv (121 samples, 0.05%)</title><rect x="1176.8" y="437" width="0.5" height="15.0" fill="rgb(205,113,3)" rx="2" ry="2" />
+<text  x="1179.76" y="447.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_tcp_packet (87 samples, 0.03%)</title><rect x="294.5" y="437" width="0.4" height="15.0" fill="rgb(250,18,17)" rx="2" ry="2" />
+<text  x="297.47" y="447.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (85 samples, 0.03%)</title><rect x="1174.3" y="341" width="0.4" height="15.0" fill="rgb(249,194,39)" rx="2" ry="2" />
+<text  x="1177.29" y="351.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (520 samples, 0.21%)</title><rect x="445.9" y="565" width="2.4" height="15.0" fill="rgb(250,115,15)" rx="2" ry="2" />
+<text  x="448.87" y="575.5" ></text>
+</g>
+<g >
+<title>blk_mq_dispatch_rq_list (32 samples, 0.01%)</title><rect x="455.5" y="613" width="0.2" height="15.0" fill="rgb(238,124,21)" rx="2" ry="2" />
+<text  x="458.54" y="623.5" ></text>
+</g>
+<g >
+<title>[unknown] (23 samples, 0.01%)</title><rect x="10.4" y="725" width="0.1" height="15.0" fill="rgb(232,75,28)" rx="2" ry="2" />
+<text  x="13.37" y="735.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (900 samples, 0.36%)</title><rect x="449.0" y="421" width="4.3" height="15.0" fill="rgb(249,1,41)" rx="2" ry="2" />
+<text  x="452.02" y="431.5" ></text>
+</g>
+<g >
+<title>br_handle_frame_finish (31,589 samples, 12.64%)</title><rect x="296.3" y="565" width="149.2" height="15.0" fill="rgb(244,47,29)" rx="2" ry="2" />
+<text  x="299.29" y="575.5" >br_handle_frame_fin..</text>
+</g>
+<g >
+<title>__dev_queue_xmit (9,466 samples, 3.79%)</title><rect x="245.3" y="197" width="44.7" height="15.0" fill="rgb(234,211,37)" rx="2" ry="2" />
+<text  x="248.25" y="207.5" >__de..</text>
+</g>
+<g >
+<title>ip_local_out (28,866 samples, 11.55%)</title><rect x="153.8" y="309" width="136.3" height="15.0" fill="rgb(244,72,27)" rx="2" ry="2" />
+<text  x="156.81" y="319.5" >ip_local_out</text>
+</g>
+<g >
+<title>__qdisc_run (203 samples, 0.08%)</title><rect x="1177.3" y="197" width="1.0" height="15.0" fill="rgb(252,186,33)" rx="2" ry="2" />
+<text  x="1180.34" y="207.5" ></text>
+</g>
+<g >
+<title>kthread (24 samples, 0.01%)</title><rect x="455.7" y="725" width="0.1" height="15.0" fill="rgb(241,45,46)" rx="2" ry="2" />
+<text  x="458.69" y="735.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow_list (972 samples, 0.39%)</title><rect x="290.9" y="501" width="4.6" height="15.0" fill="rgb(236,2,6)" rx="2" ry="2" />
+<text  x="293.94" y="511.5" ></text>
+</g>
+<g >
+<title>init_conntrack.isra.38 (51 samples, 0.02%)</title><rect x="155.0" y="229" width="0.2" height="15.0" fill="rgb(224,27,20)" rx="2" ry="2" />
+<text  x="157.98" y="239.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (40 samples, 0.02%)</title><rect x="10.0" y="661" width="0.2" height="15.0" fill="rgb(207,13,35)" rx="2" ry="2" />
+<text  x="13.01" y="671.5" ></text>
+</g>
+<g >
+<title>ip_protocol_deliver_rcu (33,049 samples, 13.23%)</title><rect x="134.5" y="453" width="156.0" height="15.0" fill="rgb(242,64,48)" rx="2" ry="2" />
+<text  x="137.45" y="463.5" >ip_protocol_deliver_..</text>
+</g>
+<g >
+<title>[docker-containerd-current] (43 samples, 0.02%)</title><rect x="10.0" y="741" width="0.2" height="15.0" fill="rgb(250,186,13)" rx="2" ry="2" />
+<text  x="13.00" y="751.5" ></text>
+</g>
+<g >
+<title>packet_rcv (22 samples, 0.01%)</title><rect x="129.7" y="517" width="0.1" height="15.0" fill="rgb(248,7,37)" rx="2" ry="2" />
+<text  x="132.74" y="527.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (20,600 samples, 8.24%)</title><rect x="297.0" y="261" width="97.3" height="15.0" fill="rgb(234,14,53)" rx="2" ry="2" />
+<text  x="300.02" y="271.5" >e1000_xmit_..</text>
+</g>
+<g >
+<title>dev_hard_start_xmit (10,313 samples, 4.13%)</title><rect x="394.5" y="261" width="48.7" height="15.0" fill="rgb(236,90,51)" rx="2" ry="2" />
+<text  x="397.47" y="271.5" >dev_..</text>
+</g>
+<g >
+<title>tcp_v6_conn_request (29,186 samples, 11.68%)</title><rect x="152.6" y="389" width="137.8" height="15.0" fill="rgb(228,10,6)" rx="2" ry="2" />
+<text  x="155.60" y="399.5" >tcp_v6_conn_request</text>
+</g>
+<g >
+<title>ip_output (630 samples, 0.25%)</title><rect x="130.9" y="453" width="2.9" height="15.0" fill="rgb(209,205,49)" rx="2" ry="2" />
+<text  x="133.87" y="463.5" ></text>
+</g>
+<g >
+<title>ebt_out_hook (34 samples, 0.01%)</title><rect x="132.2" y="277" width="0.1" height="15.0" fill="rgb(254,50,37)" rx="2" ry="2" />
+<text  x="135.18" y="287.5" ></text>
+</g>
+<g >
+<title>br_pass_frame_up (31,566 samples, 12.63%)</title><rect x="296.4" y="549" width="149.1" height="15.0" fill="rgb(213,180,4)" rx="2" ry="2" />
+<text  x="299.40" y="559.5" >br_pass_frame_up</text>
+</g>
+<g >
+<title>[dockerd-current] (28 samples, 0.01%)</title><rect x="10.2" y="725" width="0.1" height="15.0" fill="rgb(250,212,51)" rx="2" ry="2" />
+<text  x="13.22" y="735.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (377 samples, 0.15%)</title><rect x="130.9" y="421" width="1.8" height="15.0" fill="rgb(215,182,9)" rx="2" ry="2" />
+<text  x="133.93" y="431.5" ></text>
+</g>
+<g >
+<title>ip_output (31,115 samples, 12.45%)</title><rect x="296.6" y="405" width="147.0" height="15.0" fill="rgb(239,68,17)" rx="2" ry="2" />
+<text  x="299.63" y="415.5" >ip_output</text>
+</g>
+<g >
+<title>__libc_start_main (24 samples, 0.01%)</title><rect x="455.9" y="741" width="0.1" height="15.0" fill="rgb(223,69,46)" rx="2" ry="2" />
+<text  x="458.86" y="751.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (1,294 samples, 0.52%)</title><rect x="449.0" y="501" width="6.1" height="15.0" fill="rgb(235,52,8)" rx="2" ry="2" />
+<text  x="451.99" y="511.5" ></text>
+</g>
+<g >
+<title>ip_route_output_key_hash_rcu (34 samples, 0.01%)</title><rect x="153.6" y="277" width="0.1" height="15.0" fill="rgb(215,198,28)" rx="2" ry="2" />
+<text  x="156.58" y="287.5" ></text>
+</g>
+<g >
+<title>irq_exit (490 samples, 0.20%)</title><rect x="1174.0" y="581" width="2.3" height="15.0" fill="rgb(227,11,10)" rx="2" ry="2" />
+<text  x="1177.01" y="591.5" ></text>
+</g>
+<g >
+<title>ip_forward_finish (367 samples, 0.15%)</title><rect x="1177.3" y="309" width="1.8" height="15.0" fill="rgb(212,74,22)" rx="2" ry="2" />
+<text  x="1180.34" y="319.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (37 samples, 0.01%)</title><rect x="1174.0" y="245" width="0.2" height="15.0" fill="rgb(241,26,51)" rx="2" ry="2" />
+<text  x="1177.03" y="255.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (37 samples, 0.01%)</title><rect x="447.7" y="325" width="0.1" height="15.0" fill="rgb(250,22,47)" rx="2" ry="2" />
+<text  x="450.65" y="335.5" ></text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (104 samples, 0.04%)</title><rect x="1176.8" y="341" width="0.5" height="15.0" fill="rgb(234,208,10)" rx="2" ry="2" />
+<text  x="1179.81" y="351.5" ></text>
+</g>
+<g >
+<title>ip_route_input_rcu (39 samples, 0.02%)</title><rect x="443.9" y="405" width="0.2" height="15.0" fill="rgb(238,103,7)" rx="2" ry="2" />
+<text  x="446.90" y="415.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (321 samples, 0.13%)</title><rect x="153.9" y="277" width="1.5" height="15.0" fill="rgb(219,52,21)" rx="2" ry="2" />
+<text  x="156.90" y="287.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (163 samples, 0.07%)</title><rect x="1178.3" y="181" width="0.8" height="15.0" fill="rgb(254,58,46)" rx="2" ry="2" />
+<text  x="1181.30" y="191.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (73 samples, 0.03%)</title><rect x="1177.0" y="69" width="0.3" height="15.0" fill="rgb(212,137,0)" rx="2" ry="2" />
+<text  x="1179.96" y="79.5" ></text>
+</g>
+<g >
+<title>tcp_v4_send_synack (1,341 samples, 0.54%)</title><rect x="448.8" y="597" width="6.3" height="15.0" fill="rgb(252,151,11)" rx="2" ry="2" />
+<text  x="451.81" y="607.5" ></text>
+</g>
+<g >
+<title>netif_receive_skb (37 samples, 0.01%)</title><rect x="1174.0" y="405" width="0.2" height="15.0" fill="rgb(214,78,2)" rx="2" ry="2" />
+<text  x="1177.03" y="415.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (328 samples, 0.13%)</title><rect x="1174.7" y="325" width="1.5" height="15.0" fill="rgb(250,50,1)" rx="2" ry="2" />
+<text  x="1177.69" y="335.5" ></text>
+</g>
+<g >
+<title>usb_hcd_poll_rh_status (30 samples, 0.01%)</title><rect x="455.1" y="613" width="0.2" height="15.0" fill="rgb(205,211,44)" rx="2" ry="2" />
+<text  x="458.14" y="623.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (507 samples, 0.20%)</title><rect x="445.9" y="517" width="2.4" height="15.0" fill="rgb(245,49,32)" rx="2" ry="2" />
+<text  x="448.93" y="527.5" ></text>
+</g>
+<g >
+<title>reqsk_timer_handler (1,346 samples, 0.54%)</title><rect x="448.8" y="629" width="6.3" height="15.0" fill="rgb(213,81,12)" rx="2" ry="2" />
+<text  x="451.78" y="639.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (1,124 samples, 0.45%)</title><rect x="146.9" y="181" width="5.3" height="15.0" fill="rgb(232,111,3)" rx="2" ry="2" />
+<text  x="149.89" y="191.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (202 samples, 0.08%)</title><rect x="1177.3" y="149" width="1.0" height="15.0" fill="rgb(246,219,44)" rx="2" ry="2" />
+<text  x="1180.34" y="159.5" ></text>
+</g>
+<g >
+<title>cmd_record (24 samples, 0.01%)</title><rect x="455.9" y="693" width="0.1" height="15.0" fill="rgb(218,50,40)" rx="2" ry="2" />
+<text  x="458.86" y="703.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_list_core (123 samples, 0.05%)</title><rect x="1176.7" y="469" width="0.6" height="15.0" fill="rgb(212,76,22)" rx="2" ry="2" />
+<text  x="1179.75" y="479.5" ></text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (38 samples, 0.02%)</title><rect x="1176.6" y="309" width="0.1" height="15.0" fill="rgb(237,113,49)" rx="2" ry="2" />
+<text  x="1179.56" y="319.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (101 samples, 0.04%)</title><rect x="1176.8" y="181" width="0.5" height="15.0" fill="rgb(222,109,8)" rx="2" ry="2" />
+<text  x="1179.82" y="191.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_state_process (29,209 samples, 11.69%)</title><rect x="152.5" y="405" width="137.9" height="15.0" fill="rgb(226,70,6)" rx="2" ry="2" />
+<text  x="155.50" y="415.5" >tcp_rcv_state_pro..</text>
+</g>
+<g >
+<title>gro_normal_list.part.136 (35,162 samples, 14.07%)</title><rect x="129.5" y="581" width="166.1" height="15.0" fill="rgb(248,192,22)" rx="2" ry="2" />
+<text  x="132.50" y="591.5" >gro_normal_list.part...</text>
+</g>
+<g >
+<title>vmw_cmdbuf_ctx_submit.isra.4 (39 samples, 0.02%)</title><rect x="455.3" y="373" width="0.2" height="15.0" fill="rgb(210,31,41)" rx="2" ry="2" />
+<text  x="458.35" y="383.5" ></text>
+</g>
+<g >
+<title>worker_thread (32 samples, 0.01%)</title><rect x="455.5" y="709" width="0.2" height="15.0" fill="rgb(247,186,54)" rx="2" ry="2" />
+<text  x="458.54" y="719.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (37 samples, 0.01%)</title><rect x="1174.0" y="261" width="0.2" height="15.0" fill="rgb(216,40,42)" rx="2" ry="2" />
+<text  x="1177.03" y="271.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (43 samples, 0.02%)</title><rect x="152.2" y="293" width="0.2" height="15.0" fill="rgb(251,95,19)" rx="2" ry="2" />
+<text  x="155.23" y="303.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (163 samples, 0.07%)</title><rect x="1178.3" y="197" width="0.8" height="15.0" fill="rgb(245,115,33)" rx="2" ry="2" />
+<text  x="1181.30" y="207.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (73 samples, 0.03%)</title><rect x="1177.0" y="149" width="0.3" height="15.0" fill="rgb(220,24,21)" rx="2" ry="2" />
+<text  x="1179.96" y="159.5" ></text>
+</g>
+<g >
+<title>tcp_v4_conn_request (38 samples, 0.02%)</title><rect x="1176.6" y="261" width="0.1" height="15.0" fill="rgb(220,80,22)" rx="2" ry="2" />
+<text  x="1179.56" y="271.5" ></text>
+</g>
+<g >
+<title>tcp_rtx_synack (422 samples, 0.17%)</title><rect x="1174.3" y="501" width="2.0" height="15.0" fill="rgb(244,163,50)" rx="2" ry="2" />
+<text  x="1177.27" y="511.5" ></text>
+</g>
+<g >
+<title>ip_rcv (37 samples, 0.01%)</title><rect x="1174.0" y="357" width="0.2" height="15.0" fill="rgb(233,21,49)" rx="2" ry="2" />
+<text  x="1177.03" y="367.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (31 samples, 0.01%)</title><rect x="290.0" y="277" width="0.1" height="15.0" fill="rgb(212,181,43)" rx="2" ry="2" />
+<text  x="292.97" y="287.5" ></text>
+</g>
+<g >
+<title>tcp_v4_send_synack (422 samples, 0.17%)</title><rect x="1174.3" y="485" width="2.0" height="15.0" fill="rgb(239,137,14)" rx="2" ry="2" />
+<text  x="1177.27" y="495.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (898 samples, 0.36%)</title><rect x="449.0" y="405" width="4.3" height="15.0" fill="rgb(235,27,35)" rx="2" ry="2" />
+<text  x="452.02" y="415.5" ></text>
+</g>
+<g >
+<title>ipt_do_table (27 samples, 0.01%)</title><rect x="134.0" y="437" width="0.1" height="15.0" fill="rgb(209,44,7)" rx="2" ry="2" />
+<text  x="137.01" y="447.5" ></text>
+</g>
+<g >
+<title>net_rx_action (42 samples, 0.02%)</title><rect x="1174.0" y="549" width="0.2" height="15.0" fill="rgb(235,98,46)" rx="2" ry="2" />
+<text  x="1177.01" y="559.5" ></text>
+</g>
+<g >
+<title>ip_rcv (31,513 samples, 12.61%)</title><rect x="296.5" y="469" width="148.8" height="15.0" fill="rgb(224,64,2)" rx="2" ry="2" />
+<text  x="299.50" y="479.5" >ip_rcv</text>
+</g>
+<g >
+<title>neigh_resolve_output (10,340 samples, 4.14%)</title><rect x="394.4" y="341" width="48.8" height="15.0" fill="rgb(222,99,35)" rx="2" ry="2" />
+<text  x="397.40" y="351.5" >neig..</text>
+</g>
+<g >
+<title>vmw_cmdbuf_commit (39 samples, 0.02%)</title><rect x="455.3" y="437" width="0.2" height="15.0" fill="rgb(232,154,50)" rx="2" ry="2" />
+<text  x="458.35" y="447.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish_core.isra.20 (88 samples, 0.04%)</title><rect x="448.3" y="565" width="0.5" height="15.0" fill="rgb(219,133,7)" rx="2" ry="2" />
+<text  x="451.34" y="575.5" ></text>
+</g>
+<g >
+<title>drm_atomic_helper_commit_tail (41 samples, 0.02%)</title><rect x="455.3" y="581" width="0.2" height="15.0" fill="rgb(208,227,4)" rx="2" ry="2" />
+<text  x="458.34" y="591.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (18,964 samples, 7.59%)</title><rect x="155.6" y="165" width="89.5" height="15.0" fill="rgb(243,31,2)" rx="2" ry="2" />
+<text  x="158.57" y="175.5" >dev_hard_s..</text>
+</g>
+<g >
+<title>[perf] (24 samples, 0.01%)</title><rect x="455.9" y="709" width="0.1" height="15.0" fill="rgb(254,142,21)" rx="2" ry="2" />
+<text  x="458.86" y="719.5" ></text>
+</g>
+<g >
+<title>ip_local_out (37 samples, 0.01%)</title><rect x="1176.6" y="197" width="0.1" height="15.0" fill="rgb(218,77,50)" rx="2" ry="2" />
+<text  x="1179.56" y="207.5" ></text>
+</g>
+<g >
+<title>__nf_conntrack_find_get (62 samples, 0.02%)</title><rect x="444.8" y="405" width="0.2" height="15.0" fill="rgb(232,110,41)" rx="2" ry="2" />
+<text  x="447.75" y="415.5" ></text>
+</g>
+<g >
+<title>ip_local_out (97 samples, 0.04%)</title><rect x="447.5" y="405" width="0.5" height="15.0" fill="rgb(230,209,9)" rx="2" ry="2" />
+<text  x="450.49" y="415.5" ></text>
+</g>
+<g >
+<title>ip_forward (31,195 samples, 12.49%)</title><rect x="296.5" y="437" width="147.4" height="15.0" fill="rgb(248,9,17)" rx="2" ry="2" />
+<text  x="299.55" y="447.5" >ip_forward</text>
+</g>
+<g >
+<title>e1000_xmit_frame (9,438 samples, 3.78%)</title><rect x="245.3" y="133" width="44.6" height="15.0" fill="rgb(221,150,38)" rx="2" ry="2" />
+<text  x="248.33" y="143.5" >e100..</text>
+</g>
+<g >
+<title>ip_finish_output (414 samples, 0.17%)</title><rect x="1174.3" y="421" width="1.9" height="15.0" fill="rgb(226,99,30)" rx="2" ry="2" />
+<text  x="1177.29" y="431.5" ></text>
+</g>
+<g >
+<title>veth_xmit (41 samples, 0.02%)</title><rect x="131.5" y="213" width="0.2" height="15.0" fill="rgb(228,100,29)" rx="2" ry="2" />
+<text  x="134.52" y="223.5" ></text>
+</g>
+<g >
+<title>call_timer_fn (1,377 samples, 0.55%)</title><rect x="448.8" y="645" width="6.5" height="15.0" fill="rgb(227,91,13)" rx="2" ry="2" />
+<text  x="451.78" y="655.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (904 samples, 0.36%)</title><rect x="449.0" y="485" width="4.3" height="15.0" fill="rgb(254,205,48)" rx="2" ry="2" />
+<text  x="452.01" y="495.5" ></text>
+</g>
+<g >
+<title>ipt_do_table (69 samples, 0.03%)</title><rect x="295.1" y="405" width="0.3" height="15.0" fill="rgb(236,104,47)" rx="2" ry="2" />
+<text  x="298.10" y="415.5" ></text>
+</g>
+<g >
+<title>blk_mq_do_dispatch_sched (32 samples, 0.01%)</title><rect x="455.5" y="629" width="0.2" height="15.0" fill="rgb(206,62,48)" rx="2" ry="2" />
+<text  x="458.54" y="639.5" ></text>
+</g>
+<g >
+<title>[unknown] (28 samples, 0.01%)</title><rect x="10.3" y="741" width="0.2" height="15.0" fill="rgb(231,139,26)" rx="2" ry="2" />
+<text  x="13.35" y="751.5" ></text>
+</g>
+<g >
+<title>__nf_conntrack_find_get (153 samples, 0.06%)</title><rect x="154.2" y="229" width="0.8" height="15.0" fill="rgb(228,40,17)" rx="2" ry="2" />
+<text  x="157.24" y="239.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver_finish (43 samples, 0.02%)</title><rect x="1176.5" y="357" width="0.2" height="15.0" fill="rgb(215,172,12)" rx="2" ry="2" />
+<text  x="1179.54" y="367.5" ></text>
+</g>
+<g >
+<title>arch_cpu_idle (2,290 samples, 0.92%)</title><rect x="1179.2" y="597" width="10.8" height="15.0" fill="rgb(247,102,8)" rx="2" ry="2" />
+<text  x="1182.18" y="607.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (36 samples, 0.01%)</title><rect x="447.7" y="309" width="0.1" height="15.0" fill="rgb(252,147,46)" rx="2" ry="2" />
+<text  x="450.66" y="319.5" ></text>
+</g>
+<g >
+<title>process_backlog (380 samples, 0.15%)</title><rect x="1177.3" y="533" width="1.8" height="15.0" fill="rgb(223,59,18)" rx="2" ry="2" />
+<text  x="1180.33" y="543.5" ></text>
+</g>
+<g >
+<title>all (249,853 samples, 100%)</title><rect x="10.0" y="773" width="1180.0" height="15.0" fill="rgb(230,150,27)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" ></text>
+</g>
+<g >
+<title>irq_exit (583 samples, 0.23%)</title><rect x="1176.4" y="581" width="2.8" height="15.0" fill="rgb(247,34,43)" rx="2" ry="2" />
+<text  x="1179.41" y="591.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (28 samples, 0.01%)</title><rect x="1176.8" y="117" width="0.2" height="15.0" fill="rgb(235,92,24)" rx="2" ry="2" />
+<text  x="1179.82" y="127.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (85 samples, 0.03%)</title><rect x="1174.3" y="309" width="0.4" height="15.0" fill="rgb(229,76,11)" rx="2" ry="2" />
+<text  x="1177.29" y="319.5" ></text>
+</g>
+<g >
+<title>ip_forward_finish (31,121 samples, 12.46%)</title><rect x="296.6" y="421" width="147.0" height="15.0" fill="rgb(219,112,12)" rx="2" ry="2" />
+<text  x="299.61" y="431.5" >ip_forward_finish</text>
+</g>
+<g >
+<title>dev_hard_start_xmit (44 samples, 0.02%)</title><rect x="131.5" y="229" width="0.2" height="15.0" fill="rgb(221,180,6)" rx="2" ry="2" />
+<text  x="134.51" y="239.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb (371 samples, 0.15%)</title><rect x="1177.3" y="389" width="1.8" height="15.0" fill="rgb(219,102,5)" rx="2" ry="2" />
+<text  x="1180.34" y="399.5" ></text>
+</g>
+<g >
+<title>run_timer_softirq (1,379 samples, 0.55%)</title><rect x="448.8" y="661" width="6.5" height="15.0" fill="rgb(206,176,35)" rx="2" ry="2" />
+<text  x="451.77" y="671.5" ></text>
+</g>
+<g >
+<title>ret_from_fork (43 samples, 0.02%)</title><rect x="455.3" y="741" width="0.2" height="15.0" fill="rgb(221,62,43)" rx="2" ry="2" />
+<text  x="458.33" y="751.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (20,664 samples, 8.27%)</title><rect x="296.8" y="341" width="97.6" height="15.0" fill="rgb(240,62,14)" rx="2" ry="2" />
+<text  x="299.79" y="351.5" >dev_queue_x..</text>
+</g>
+<g >
+<title>ip_forward_finish (636 samples, 0.25%)</title><rect x="130.8" y="469" width="3.0" height="15.0" fill="rgb(253,209,1)" rx="2" ry="2" />
+<text  x="133.84" y="479.5" ></text>
+</g>
+<g >
+<title>__inet_lookup_established (39 samples, 0.02%)</title><rect x="130.5" y="469" width="0.2" height="15.0" fill="rgb(227,160,23)" rx="2" ry="2" />
+<text  x="133.54" y="479.5" ></text>
+</g>
+<g >
+<title>ip_route_input_rcu (74 samples, 0.03%)</title><rect x="130.2" y="469" width="0.3" height="15.0" fill="rgb(207,33,24)" rx="2" ry="2" />
+<text  x="133.19" y="479.5" ></text>
+</g>
+<g >
+<title>worker_thread (43 samples, 0.02%)</title><rect x="455.3" y="709" width="0.2" height="15.0" fill="rgb(228,36,24)" rx="2" ry="2" />
+<text  x="458.33" y="719.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (73 samples, 0.03%)</title><rect x="1177.0" y="101" width="0.3" height="15.0" fill="rgb(251,153,28)" rx="2" ry="2" />
+<text  x="1179.96" y="111.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (81 samples, 0.03%)</title><rect x="131.5" y="245" width="0.3" height="15.0" fill="rgb(226,36,24)" rx="2" ry="2" />
+<text  x="134.46" y="255.5" ></text>
+</g>
+<g >
+<title>tcp_v4_conn_request (104 samples, 0.04%)</title><rect x="1176.8" y="293" width="0.5" height="15.0" fill="rgb(237,4,0)" rx="2" ry="2" />
+<text  x="1179.81" y="303.5" ></text>
+</g>
+<g >
+<title>drm_atomic_helper_dirtyfb (42 samples, 0.02%)</title><rect x="455.3" y="645" width="0.2" height="15.0" fill="rgb(240,187,35)" rx="2" ry="2" />
+<text  x="458.34" y="655.5" ></text>
+</g>
+<g >
+<title>default_idle (153,124 samples, 61.29%)</title><rect x="456.0" y="645" width="723.2" height="15.0" fill="rgb(225,228,50)" rx="2" ry="2" />
+<text  x="458.99" y="655.5" >default_idle</text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (380 samples, 0.15%)</title><rect x="1177.3" y="501" width="1.8" height="15.0" fill="rgb(210,110,47)" rx="2" ry="2" />
+<text  x="1180.33" y="511.5" ></text>
+</g>
+<g >
+<title>consume_skb (28 samples, 0.01%)</title><rect x="446.2" y="469" width="0.1" height="15.0" fill="rgb(208,207,33)" rx="2" ry="2" />
+<text  x="449.20" y="479.5" ></text>
+</g>
+<g >
+<title>blk_mq_run_work_fn (32 samples, 0.01%)</title><rect x="455.5" y="677" width="0.2" height="15.0" fill="rgb(218,196,10)" rx="2" ry="2" />
+<text  x="458.54" y="687.5" ></text>
+</g>
+<g >
+<title>ip_send_unicast_reply (3,656 samples, 1.46%)</title><rect x="135.2" y="373" width="17.3" height="15.0" fill="rgb(243,202,0)" rx="2" ry="2" />
+<text  x="138.20" y="383.5" ></text>
+</g>
+<g >
+<title>vmw_kms_helper_validation_finish (39 samples, 0.02%)</title><rect x="455.3" y="501" width="0.2" height="15.0" fill="rgb(215,85,49)" rx="2" ry="2" />
+<text  x="458.35" y="511.5" ></text>
+</g>
+<g >
+<title>ip_route_output_key_hash (36 samples, 0.01%)</title><rect x="447.2" y="389" width="0.2" height="15.0" fill="rgb(246,179,39)" rx="2" ry="2" />
+<text  x="450.22" y="399.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (10,286 samples, 4.12%)</title><rect x="394.6" y="245" width="48.6" height="15.0" fill="rgb(235,0,5)" rx="2" ry="2" />
+<text  x="397.59" y="255.5" >e100..</text>
+</g>
+<g >
+<title>e1000_xmit_frame (328 samples, 0.13%)</title><rect x="1174.7" y="277" width="1.5" height="15.0" fill="rgb(207,214,22)" rx="2" ry="2" />
+<text  x="1177.69" y="287.5" ></text>
+</g>
+<g >
+<title>mpt_put_msg_frame (32 samples, 0.01%)</title><rect x="455.5" y="549" width="0.2" height="15.0" fill="rgb(237,192,25)" rx="2" ry="2" />
+<text  x="458.54" y="559.5" ></text>
+</g>
+<g >
+<title>e1000_clean_rx_irq (51 samples, 0.02%)</title><rect x="1176.5" y="517" width="0.2" height="15.0" fill="rgb(235,36,23)" rx="2" ry="2" />
+<text  x="1179.50" y="527.5" ></text>
+</g>
+<g >
+<title>e1000_alloc_rx_buffers (25,100 samples, 10.05%)</title><rect x="10.8" y="613" width="118.5" height="15.0" fill="rgb(228,146,6)" rx="2" ry="2" />
+<text  x="13.79" y="623.5" >e1000_alloc_rx..</text>
+</g>
+<g >
+<title>dockerd-current (56 samples, 0.02%)</title><rect x="10.2" y="757" width="0.3" height="15.0" fill="rgb(218,20,26)" rx="2" ry="2" />
+<text  x="13.22" y="767.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (1,127 samples, 0.45%)</title><rect x="146.9" y="213" width="5.3" height="15.0" fill="rgb(222,202,48)" rx="2" ry="2" />
+<text  x="149.89" y="223.5" ></text>
+</g>
+<g >
+<title>tcp_make_synack (54 samples, 0.02%)</title><rect x="448.0" y="421" width="0.2" height="15.0" fill="rgb(246,76,14)" rx="2" ry="2" />
+<text  x="450.97" y="431.5" ></text>
+</g>
+<g >
+<title>__dev_kfree_skb_any (61 samples, 0.02%)</title><rect x="295.6" y="613" width="0.3" height="15.0" fill="rgb(205,102,17)" rx="2" ry="2" />
+<text  x="298.59" y="623.5" ></text>
+</g>
+<g >
+<title>ksoftirqd/1 (94,183 samples, 37.70%)</title><rect x="10.5" y="757" width="444.8" height="15.0" fill="rgb(232,179,20)" rx="2" ry="2" />
+<text  x="13.48" y="767.5" >ksoftirqd/1</text>
+</g>
+<g >
+<title>net_rx_action (564 samples, 0.23%)</title><rect x="1176.5" y="549" width="2.6" height="15.0" fill="rgb(216,20,23)" rx="2" ry="2" />
+<text  x="1179.46" y="559.5" ></text>
+</g>
+<g >
+<title>scsi_queue_rq (32 samples, 0.01%)</title><rect x="455.5" y="597" width="0.2" height="15.0" fill="rgb(250,104,22)" rx="2" ry="2" />
+<text  x="458.54" y="607.5" ></text>
+</g>
+<g >
+<title>__alloc_skb (29 samples, 0.01%)</title><rect x="290.2" y="309" width="0.1" height="15.0" fill="rgb(212,175,27)" rx="2" ry="2" />
+<text  x="293.20" y="319.5" ></text>
+</g>
+<g >
+<title>fib_table_lookup (40 samples, 0.02%)</title><rect x="130.3" y="437" width="0.1" height="15.0" fill="rgb(253,192,14)" rx="2" ry="2" />
+<text  x="133.26" y="447.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb (37 samples, 0.01%)</title><rect x="1174.0" y="389" width="0.2" height="15.0" fill="rgb(212,169,3)" rx="2" ry="2" />
+<text  x="1177.03" y="399.5" ></text>
+</g>
+<g >
+<title>gro_normal_list.part.136 (44 samples, 0.02%)</title><rect x="1176.5" y="469" width="0.2" height="15.0" fill="rgb(220,214,1)" rx="2" ry="2" />
+<text  x="1179.54" y="479.5" ></text>
+</g>
+<g >
+<title>vmw_fb_dirty_flush (42 samples, 0.02%)</title><rect x="455.3" y="677" width="0.2" height="15.0" fill="rgb(253,208,6)" rx="2" ry="2" />
+<text  x="458.34" y="687.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (32 samples, 0.01%)</title><rect x="10.0" y="597" width="0.2" height="15.0" fill="rgb(243,120,41)" rx="2" ry="2" />
+<text  x="13.01" y="607.5" ></text>
+</g>
+<g >
+<title>run_timer_softirq (438 samples, 0.18%)</title><rect x="1174.3" y="549" width="2.0" height="15.0" fill="rgb(207,189,42)" rx="2" ry="2" />
+<text  x="1177.25" y="559.5" ></text>
+</g>
+<g >
+<title>destroy_conntrack (27 samples, 0.01%)</title><rect x="294.3" y="421" width="0.2" height="15.0" fill="rgb(253,185,28)" rx="2" ry="2" />
+<text  x="297.34" y="431.5" ></text>
+</g>
+<g >
+<title>__br_forward (202 samples, 0.08%)</title><rect x="131.4" y="309" width="0.9" height="15.0" fill="rgb(214,103,37)" rx="2" ry="2" />
+<text  x="134.39" y="319.5" ></text>
+</g>
+<g >
+<title>reqsk_timer_handler (422 samples, 0.17%)</title><rect x="1174.3" y="517" width="2.0" height="15.0" fill="rgb(237,215,14)" rx="2" ry="2" />
+<text  x="1177.27" y="527.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (9,466 samples, 3.79%)</title><rect x="245.3" y="213" width="44.7" height="15.0" fill="rgb(248,138,6)" rx="2" ry="2" />
+<text  x="248.25" y="223.5" >dev_..</text>
+</g>
+<g >
+<title>ip_finish_output (3,526 samples, 1.41%)</title><rect x="135.6" y="293" width="16.6" height="15.0" fill="rgb(235,39,39)" rx="2" ry="2" />
+<text  x="138.57" y="303.5" ></text>
+</g>
+<g >
+<title>gro_normal_one (35,164 samples, 14.07%)</title><rect x="129.5" y="597" width="166.1" height="15.0" fill="rgb(234,65,3)" rx="2" ry="2" />
+<text  x="132.49" y="607.5" >gro_normal_one</text>
+</g>
+<g >
+<title>tcp_v6_conn_request (38 samples, 0.02%)</title><rect x="1176.6" y="277" width="0.1" height="15.0" fill="rgb(220,142,48)" rx="2" ry="2" />
+<text  x="1179.56" y="287.5" ></text>
+</g>
+<g >
+<title>secondary_startup_64 (155,422 samples, 62.21%)</title><rect x="456.0" y="741" width="734.0" height="15.0" fill="rgb(243,50,43)" rx="2" ry="2" />
+<text  x="458.97" y="751.5" >secondary_startup_64</text>
+</g>
+<g >
+<title>dev_queue_xmit_nit (24 samples, 0.01%)</title><rect x="394.5" y="245" width="0.1" height="15.0" fill="rgb(224,76,6)" rx="2" ry="2" />
+<text  x="397.48" y="255.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (85 samples, 0.03%)</title><rect x="1174.3" y="357" width="0.4" height="15.0" fill="rgb(224,53,37)" rx="2" ry="2" />
+<text  x="1177.29" y="367.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (43 samples, 0.02%)</title><rect x="1176.5" y="325" width="0.2" height="15.0" fill="rgb(229,20,36)" rx="2" ry="2" />
+<text  x="1179.54" y="335.5" ></text>
+</g>
+<g >
+<title>kthread (32 samples, 0.01%)</title><rect x="455.5" y="725" width="0.2" height="15.0" fill="rgb(206,9,52)" rx="2" ry="2" />
+<text  x="458.54" y="735.5" ></text>
+</g>
+<g >
+<title>ipt_do_table (39 samples, 0.02%)</title><rect x="444.3" y="421" width="0.2" height="15.0" fill="rgb(215,115,24)" rx="2" ry="2" />
+<text  x="447.31" y="431.5" ></text>
+</g>
+<g >
+<title>__nf_nat_alloc_null_binding (114 samples, 0.05%)</title><rect x="133.2" y="373" width="0.5" height="15.0" fill="rgb(254,23,5)" rx="2" ry="2" />
+<text  x="136.17" y="383.5" ></text>
+</g>
+<g >
+<title>ip_local_out (1,327 samples, 0.53%)</title><rect x="448.8" y="565" width="6.3" height="15.0" fill="rgb(214,173,30)" rx="2" ry="2" />
+<text  x="451.84" y="575.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish_core.isra.20 (131 samples, 0.05%)</title><rect x="130.1" y="501" width="0.6" height="15.0" fill="rgb(248,160,28)" rx="2" ry="2" />
+<text  x="133.11" y="511.5" ></text>
+</g>
+<g >
+<title>__nf_nat_alloc_null_binding (22 samples, 0.01%)</title><rect x="152.3" y="229" width="0.1" height="15.0" fill="rgb(249,163,0)" rx="2" ry="2" />
+<text  x="155.27" y="239.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_destroy (27 samples, 0.01%)</title><rect x="294.3" y="437" width="0.2" height="15.0" fill="rgb(225,101,0)" rx="2" ry="2" />
+<text  x="297.34" y="447.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (163 samples, 0.07%)</title><rect x="1178.3" y="229" width="0.8" height="15.0" fill="rgb(235,53,18)" rx="2" ry="2" />
+<text  x="1181.30" y="239.5" ></text>
+</g>
+<g >
+<title>mls_export_netlbl_cat (30 samples, 0.01%)</title><rect x="446.9" y="373" width="0.1" height="15.0" fill="rgb(252,27,16)" rx="2" ry="2" />
+<text  x="449.90" y="383.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (2,391 samples, 0.96%)</title><rect x="135.6" y="213" width="11.3" height="15.0" fill="rgb(223,10,33)" rx="2" ry="2" />
+<text  x="138.59" y="223.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (53 samples, 0.02%)</title><rect x="443.6" y="421" width="0.3" height="15.0" fill="rgb(235,2,14)" rx="2" ry="2" />
+<text  x="446.61" y="431.5" ></text>
+</g>
+<g >
+<title>selinux_netlbl_inet_conn_request (69 samples, 0.03%)</title><rect x="153.0" y="309" width="0.4" height="15.0" fill="rgb(245,155,22)" rx="2" ry="2" />
+<text  x="156.03" y="319.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (109 samples, 0.04%)</title><rect x="1176.8" y="405" width="0.5" height="15.0" fill="rgb(227,32,31)" rx="2" ry="2" />
+<text  x="1179.79" y="415.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (27 samples, 0.01%)</title><rect x="1174.0" y="165" width="0.2" height="15.0" fill="rgb(231,108,13)" rx="2" ry="2" />
+<text  x="1177.03" y="175.5" ></text>
+</g>
+<g >
+<title>ip_output (101 samples, 0.04%)</title><rect x="1176.8" y="213" width="0.5" height="15.0" fill="rgb(230,64,25)" rx="2" ry="2" />
+<text  x="1179.82" y="223.5" ></text>
+</g>
+<g >
+<title>net_rx_action (92,798 samples, 37.14%)</title><rect x="10.5" y="661" width="438.3" height="15.0" fill="rgb(230,65,47)" rx="2" ry="2" />
+<text  x="13.50" y="671.5" >net_rx_action</text>
+</g>
+<g >
+<title>__netif_receive_skb (31,528 samples, 12.62%)</title><rect x="296.4" y="501" width="148.9" height="15.0" fill="rgb(244,220,17)" rx="2" ry="2" />
+<text  x="299.44" y="511.5" >__netif_receive_skb</text>
+</g>
+<g >
+<title>ip_finish_output2 (414 samples, 0.17%)</title><rect x="1174.3" y="389" width="1.9" height="15.0" fill="rgb(251,118,46)" rx="2" ry="2" />
+<text  x="1177.29" y="399.5" ></text>
+</g>
+<g >
+<title>__nf_conntrack_find_get (380 samples, 0.15%)</title><rect x="292.3" y="437" width="1.8" height="15.0" fill="rgb(210,113,31)" rx="2" ry="2" />
+<text  x="295.29" y="447.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_in (117 samples, 0.05%)</title><rect x="444.7" y="421" width="0.6" height="15.0" fill="rgb(206,32,26)" rx="2" ry="2" />
+<text  x="447.71" y="431.5" ></text>
+</g>
+<g >
+<title>ip_route_input_slow (38 samples, 0.02%)</title><rect x="443.9" y="389" width="0.2" height="15.0" fill="rgb(205,53,43)" rx="2" ry="2" />
+<text  x="446.90" y="399.5" ></text>
+</g>
+<g >
+<title>ip_output (1,297 samples, 0.52%)</title><rect x="449.0" y="549" width="6.1" height="15.0" fill="rgb(249,54,5)" rx="2" ry="2" />
+<text  x="451.98" y="559.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (23 samples, 0.01%)</title><rect x="1176.6" y="53" width="0.1" height="15.0" fill="rgb(227,5,22)" rx="2" ry="2" />
+<text  x="1179.56" y="63.5" ></text>
+</g>
+<g >
+<title>e1000_clean_rx_irq (60,342 samples, 24.15%)</title><rect x="10.6" y="629" width="285.0" height="15.0" fill="rgb(253,140,35)" rx="2" ry="2" />
+<text  x="13.59" y="639.5" >e1000_clean_rx_irq</text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (450 samples, 0.18%)</title><rect x="446.2" y="501" width="2.1" height="15.0" fill="rgb(205,114,23)" rx="2" ry="2" />
+<text  x="449.17" y="511.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_out (149 samples, 0.06%)</title><rect x="133.1" y="421" width="0.7" height="15.0" fill="rgb(206,215,50)" rx="2" ry="2" />
+<text  x="136.10" y="431.5" ></text>
+</g>
+<g >
+<title>br_forward_finish (116 samples, 0.05%)</title><rect x="131.4" y="293" width="0.6" height="15.0" fill="rgb(233,102,48)" rx="2" ry="2" />
+<text  x="134.43" y="303.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (20,652 samples, 8.27%)</title><rect x="296.8" y="309" width="97.5" height="15.0" fill="rgb(216,2,1)" rx="2" ry="2" />
+<text  x="299.80" y="319.5" >__qdisc_run</text>
+</g>
+<g >
+<title>default_idle (2,290 samples, 0.92%)</title><rect x="1179.2" y="581" width="10.8" height="15.0" fill="rgb(248,96,5)" rx="2" ry="2" />
+<text  x="1182.18" y="591.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (33,145 samples, 13.27%)</title><rect x="134.4" y="485" width="156.5" height="15.0" fill="rgb(218,168,50)" rx="2" ry="2" />
+<text  x="137.39" y="495.5" >ip_local_deliver</text>
+</g>
+<g >
+<title>nf_nat_ipv4_in (123 samples, 0.05%)</title><rect x="294.9" y="469" width="0.6" height="15.0" fill="rgb(235,68,44)" rx="2" ry="2" />
+<text  x="297.93" y="479.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (63 samples, 0.03%)</title><rect x="290.6" y="469" width="0.3" height="15.0" fill="rgb(232,63,30)" rx="2" ry="2" />
+<text  x="293.62" y="479.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (32,335 samples, 12.94%)</title><rect x="296.0" y="613" width="152.8" height="15.0" fill="rgb(244,205,0)" rx="2" ry="2" />
+<text  x="299.05" y="623.5" >__netif_receive_skb..</text>
+</g>
+<g >
+<title>__qdisc_run (18,986 samples, 7.60%)</title><rect x="155.5" y="197" width="89.7" height="15.0" fill="rgb(230,78,18)" rx="2" ry="2" />
+<text  x="158.54" y="207.5" >__qdisc_run</text>
+</g>
+<g >
+<title>dev_queue_xmit (28 samples, 0.01%)</title><rect x="1176.8" y="149" width="0.2" height="15.0" fill="rgb(229,15,36)" rx="2" ry="2" />
+<text  x="1179.82" y="159.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (386 samples, 0.15%)</title><rect x="453.3" y="405" width="1.8" height="15.0" fill="rgb(224,128,11)" rx="2" ry="2" />
+<text  x="456.28" y="415.5" ></text>
+</g>
+<g >
+<title>ip_forward (369 samples, 0.15%)</title><rect x="1177.3" y="325" width="1.8" height="15.0" fill="rgb(213,7,45)" rx="2" ry="2" />
+<text  x="1180.34" y="335.5" ></text>
+</g>
+<g >
+<title>ipv4_conntrack_local (38 samples, 0.02%)</title><rect x="135.3" y="277" width="0.2" height="15.0" fill="rgb(220,34,17)" rx="2" ry="2" />
+<text  x="138.30" y="287.5" ></text>
+</g>
+<g >
+<title>ret_from_fork (32 samples, 0.01%)</title><rect x="455.5" y="741" width="0.2" height="15.0" fill="rgb(238,130,32)" rx="2" ry="2" />
+<text  x="458.54" y="751.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (64 samples, 0.03%)</title><rect x="132.0" y="293" width="0.3" height="15.0" fill="rgb(248,144,42)" rx="2" ry="2" />
+<text  x="135.04" y="303.5" ></text>
+</g>
+<g >
+<title>ipt_do_table (43 samples, 0.02%)</title><rect x="444.5" y="421" width="0.2" height="15.0" fill="rgb(228,58,30)" rx="2" ry="2" />
+<text  x="447.50" y="431.5" ></text>
+</g>
+<g >
+<title>__ip_local_out (30 samples, 0.01%)</title><rect x="448.8" y="549" width="0.2" height="15.0" fill="rgb(252,2,10)" rx="2" ry="2" />
+<text  x="451.84" y="559.5" ></text>
+</g>
+<g >
+<title>default_idle_call (2,290 samples, 0.92%)</title><rect x="1179.2" y="613" width="10.8" height="15.0" fill="rgb(233,58,26)" rx="2" ry="2" />
+<text  x="1182.18" y="623.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (204 samples, 0.08%)</title><rect x="1177.3" y="229" width="1.0" height="15.0" fill="rgb(234,31,11)" rx="2" ry="2" />
+<text  x="1180.34" y="239.5" ></text>
+</g>
+<g >
+<title>call_timer_fn (436 samples, 0.17%)</title><rect x="1174.3" y="533" width="2.0" height="15.0" fill="rgb(245,120,6)" rx="2" ry="2" />
+<text  x="1177.26" y="543.5" ></text>
+</g>
+<g >
+<title>ipv4_conntrack_in (572 samples, 0.23%)</title><rect x="292.2" y="469" width="2.7" height="15.0" fill="rgb(244,120,2)" rx="2" ry="2" />
+<text  x="295.21" y="479.5" ></text>
+</g>
+<g >
+<title>netif_receive_skb_list_internal (44 samples, 0.02%)</title><rect x="1176.5" y="453" width="0.2" height="15.0" fill="rgb(231,145,10)" rx="2" ry="2" />
+<text  x="1179.54" y="463.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (1,124 samples, 0.45%)</title><rect x="146.9" y="197" width="5.3" height="15.0" fill="rgb(206,141,27)" rx="2" ry="2" />
+<text  x="149.89" y="207.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (20,637 samples, 8.26%)</title><rect x="296.9" y="277" width="97.4" height="15.0" fill="rgb(207,101,39)" rx="2" ry="2" />
+<text  x="299.85" y="287.5" >dev_hard_st..</text>
+</g>
+<g >
+<title>cookie_v4_init_sequence (22 samples, 0.01%)</title><rect x="446.4" y="437" width="0.1" height="15.0" fill="rgb(213,175,1)" rx="2" ry="2" />
+<text  x="449.43" y="447.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (23 samples, 0.01%)</title><rect x="1176.6" y="101" width="0.1" height="15.0" fill="rgb(234,132,17)" rx="2" ry="2" />
+<text  x="1179.56" y="111.5" ></text>
+</g>
+<g >
+<title>consume_skb (56 samples, 0.02%)</title><rect x="295.6" y="597" width="0.3" height="15.0" fill="rgb(221,41,22)" rx="2" ry="2" />
+<text  x="298.60" y="607.5" ></text>
+</g>
+<g >
+<title>br_netif_receive_skb (31,532 samples, 12.62%)</title><rect x="296.4" y="533" width="148.9" height="15.0" fill="rgb(240,164,16)" rx="2" ry="2" />
+<text  x="299.42" y="543.5" >br_netif_receive_skb</text>
+</g>
+<g >
+<title>swapper (155,422 samples, 62.21%)</title><rect x="456.0" y="757" width="734.0" height="15.0" fill="rgb(226,203,18)" rx="2" ry="2" />
+<text  x="458.97" y="767.5" >swapper</text>
+</g>
+<g >
+<title>__softirqentry_text_start (94,182 samples, 37.69%)</title><rect x="10.5" y="677" width="444.8" height="15.0" fill="rgb(215,59,28)" rx="2" ry="2" />
+<text  x="13.49" y="687.5" >__softirqentry_text_start</text>
+</g>
+<g >
+<title>dev_hard_start_xmit (9,453 samples, 3.78%)</title><rect x="245.3" y="149" width="44.6" height="15.0" fill="rgb(232,117,42)" rx="2" ry="2" />
+<text  x="248.27" y="159.5" >dev_..</text>
+</g>
+<g >
+<title>__dev_queue_xmit (2,393 samples, 0.96%)</title><rect x="135.6" y="229" width="11.3" height="15.0" fill="rgb(206,98,30)" rx="2" ry="2" />
+<text  x="138.58" y="239.5" ></text>
+</g>
+<g >
+<title>security_inet_conn_request (89 samples, 0.04%)</title><rect x="446.7" y="437" width="0.4" height="15.0" fill="rgb(215,114,41)" rx="2" ry="2" />
+<text  x="449.66" y="447.5" ></text>
+</g>
+<g >
+<title>drm_atomic_commit (41 samples, 0.02%)</title><rect x="455.3" y="629" width="0.2" height="15.0" fill="rgb(224,215,46)" rx="2" ry="2" />
+<text  x="458.34" y="639.5" ></text>
+</g>
+<g >
+<title>br_handle_frame_finish (371 samples, 0.15%)</title><rect x="1177.3" y="453" width="1.8" height="15.0" fill="rgb(231,127,32)" rx="2" ry="2" />
+<text  x="1180.34" y="463.5" ></text>
+</g>
+<g >
+<title>tcp_v6_conn_request (104 samples, 0.04%)</title><rect x="1176.8" y="309" width="0.5" height="15.0" fill="rgb(244,6,39)" rx="2" ry="2" />
+<text  x="1179.81" y="319.5" ></text>
+</g>
+<g >
+<title>arch_call_rest_init (2,290 samples, 0.92%)</title><rect x="1179.2" y="677" width="10.8" height="15.0" fill="rgb(252,145,52)" rx="2" ry="2" />
+<text  x="1182.18" y="687.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish (37 samples, 0.01%)</title><rect x="1174.0" y="341" width="0.2" height="15.0" fill="rgb(221,2,50)" rx="2" ry="2" />
+<text  x="1177.03" y="351.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_core (31,697 samples, 12.69%)</title><rect x="296.1" y="597" width="149.7" height="15.0" fill="rgb(244,125,36)" rx="2" ry="2" />
+<text  x="299.09" y="607.5" >__netif_receive_skb..</text>
+</g>
+<g >
+<title>dev_queue_xmit (73 samples, 0.03%)</title><rect x="1177.0" y="133" width="0.3" height="15.0" fill="rgb(206,117,38)" rx="2" ry="2" />
+<text  x="1179.96" y="143.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (1,127 samples, 0.45%)</title><rect x="146.9" y="229" width="5.3" height="15.0" fill="rgb(215,167,1)" rx="2" ry="2" />
+<text  x="149.89" y="239.5" ></text>
+</g>
+<g >
+<title>init_conntrack.isra.38 (23 samples, 0.01%)</title><rect x="294.2" y="437" width="0.1" height="15.0" fill="rgb(238,228,34)" rx="2" ry="2" />
+<text  x="297.23" y="447.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (30 samples, 0.01%)</title><rect x="455.1" y="581" width="0.2" height="15.0" fill="rgb(224,38,41)" rx="2" ry="2" />
+<text  x="458.14" y="591.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (10,319 samples, 4.13%)</title><rect x="394.5" y="277" width="48.7" height="15.0" fill="rgb(224,35,40)" rx="2" ry="2" />
+<text  x="397.46" y="287.5" >sch_..</text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (31,526 samples, 12.62%)</title><rect x="296.5" y="485" width="148.8" height="15.0" fill="rgb(254,222,30)" rx="2" ry="2" />
+<text  x="299.45" y="495.5" >__netif_receive_skb..</text>
+</g>
+<g >
+<title>netif_receive_skb (31,531 samples, 12.62%)</title><rect x="296.4" y="517" width="148.9" height="15.0" fill="rgb(206,171,38)" rx="2" ry="2" />
+<text  x="299.43" y="527.5" >netif_receive_skb</text>
+</g>
+<g >
+<title>nf_conntrack_in (570 samples, 0.23%)</title><rect x="292.2" y="453" width="2.7" height="15.0" fill="rgb(210,61,36)" rx="2" ry="2" />
+<text  x="295.22" y="463.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_tcp_packet (31 samples, 0.01%)</title><rect x="445.1" y="405" width="0.1" height="15.0" fill="rgb(236,44,27)" rx="2" ry="2" />
+<text  x="448.10" y="415.5" ></text>
+</g>
+<g >
+<title>ebt_do_table (31 samples, 0.01%)</title><rect x="132.2" y="261" width="0.1" height="15.0" fill="rgb(243,217,21)" rx="2" ry="2" />
+<text  x="135.20" y="271.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (18,996 samples, 7.60%)</title><rect x="155.5" y="213" width="89.7" height="15.0" fill="rgb(235,157,22)" rx="2" ry="2" />
+<text  x="158.51" y="223.5" >__dev_queu..</text>
+</g>
+<g >
+<title>tcp_v4_early_demux (39 samples, 0.02%)</title><rect x="130.5" y="485" width="0.2" height="15.0" fill="rgb(234,122,13)" rx="2" ry="2" />
+<text  x="133.54" y="495.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (367 samples, 0.15%)</title><rect x="1177.3" y="245" width="1.8" height="15.0" fill="rgb(227,123,54)" rx="2" ry="2" />
+<text  x="1180.34" y="255.5" ></text>
+</g>
+<g >
+<title>ip_list_rcv (121 samples, 0.05%)</title><rect x="1176.8" y="453" width="0.5" height="15.0" fill="rgb(234,90,50)" rx="2" ry="2" />
+<text  x="1179.76" y="463.5" ></text>
+</g>
+<g >
+<title>docker-containe (45 samples, 0.02%)</title><rect x="10.0" y="757" width="0.2" height="15.0" fill="rgb(228,95,25)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" ></text>
+</g>
+<g >
+<title>kthread (94,183 samples, 37.70%)</title><rect x="10.5" y="725" width="444.8" height="15.0" fill="rgb(209,9,15)" rx="2" ry="2" />
+<text  x="13.48" y="735.5" >kthread</text>
+</g>
+<g >
+<title>nf_hook_slow (927 samples, 0.37%)</title><rect x="291.1" y="485" width="4.4" height="15.0" fill="rgb(246,204,47)" rx="2" ry="2" />
+<text  x="294.13" y="495.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (49 samples, 0.02%)</title><rect x="132.5" y="341" width="0.2" height="15.0" fill="rgb(215,118,46)" rx="2" ry="2" />
+<text  x="135.46" y="351.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_destroy (25 samples, 0.01%)</title><rect x="155.2" y="229" width="0.1" height="15.0" fill="rgb(219,99,45)" rx="2" ry="2" />
+<text  x="158.23" y="239.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (66 samples, 0.03%)</title><rect x="443.2" y="389" width="0.4" height="15.0" fill="rgb(249,221,28)" rx="2" ry="2" />
+<text  x="446.25" y="399.5" ></text>
+</g>
+<g >
+<title>br_dev_xmit (241 samples, 0.10%)</title><rect x="131.2" y="341" width="1.2" height="15.0" fill="rgb(248,39,17)" rx="2" ry="2" />
+<text  x="134.21" y="351.5" ></text>
+</g>
+<g >
+<title>native_safe_halt (2,290 samples, 0.92%)</title><rect x="1179.2" y="565" width="10.8" height="15.0" fill="rgb(222,48,40)" rx="2" ry="2" />
+<text  x="1182.18" y="575.5" ></text>
+</g>
+<g >
+<title>mptscsih_qcmd (32 samples, 0.01%)</title><rect x="455.5" y="565" width="0.2" height="15.0" fill="rgb(209,101,15)" rx="2" ry="2" />
+<text  x="458.54" y="575.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_fn (147 samples, 0.06%)</title><rect x="133.1" y="405" width="0.7" height="15.0" fill="rgb(250,101,6)" rx="2" ry="2" />
+<text  x="136.11" y="415.5" ></text>
+</g>
+<g >
+<title>process_backlog (38 samples, 0.02%)</title><rect x="1174.0" y="533" width="0.2" height="15.0" fill="rgb(212,211,33)" rx="2" ry="2" />
+<text  x="1177.03" y="543.5" ></text>
+</g>
+<g >
+<title>native_safe_halt (153,124 samples, 61.29%)</title><rect x="456.0" y="629" width="723.2" height="15.0" fill="rgb(239,99,13)" rx="2" ry="2" />
+<text  x="458.99" y="639.5" >native_safe_halt</text>
+</g>
+<g >
+<title>nf_confirm (36 samples, 0.01%)</title><rect x="132.9" y="405" width="0.2" height="15.0" fill="rgb(252,195,42)" rx="2" ry="2" />
+<text  x="135.91" y="415.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (85 samples, 0.03%)</title><rect x="1174.3" y="373" width="0.4" height="15.0" fill="rgb(246,165,51)" rx="2" ry="2" />
+<text  x="1177.29" y="383.5" ></text>
+</g>
+<g >
+<title>e1000_clean (183 samples, 0.07%)</title><rect x="1176.5" y="533" width="0.8" height="15.0" fill="rgb(211,177,40)" rx="2" ry="2" />
+<text  x="1179.46" y="543.5" ></text>
+</g>
+<g >
+<title>ip_sublist_rcv_finish (33,924 samples, 13.58%)</title><rect x="130.7" y="501" width="160.2" height="15.0" fill="rgb(231,89,13)" rx="2" ry="2" />
+<text  x="133.73" y="511.5" >ip_sublist_rcv_finish</text>
+</g>
+<g >
+<title>ip_finish_output2 (3,523 samples, 1.41%)</title><rect x="135.6" y="261" width="16.6" height="15.0" fill="rgb(224,59,52)" rx="2" ry="2" />
+<text  x="138.57" y="271.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (2,377 samples, 0.95%)</title><rect x="135.6" y="165" width="11.3" height="15.0" fill="rgb(230,197,48)" rx="2" ry="2" />
+<text  x="138.64" y="175.5" ></text>
+</g>
+<g >
+<title>ip_rcv (371 samples, 0.15%)</title><rect x="1177.3" y="357" width="1.8" height="15.0" fill="rgb(206,70,8)" rx="2" ry="2" />
+<text  x="1180.34" y="367.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (83 samples, 0.03%)</title><rect x="1174.3" y="293" width="0.4" height="15.0" fill="rgb(246,142,15)" rx="2" ry="2" />
+<text  x="1177.30" y="303.5" ></text>
+</g>
+<g >
+<title>start_secondary (153,132 samples, 61.29%)</title><rect x="456.0" y="725" width="723.2" height="15.0" fill="rgb(218,101,18)" rx="2" ry="2" />
+<text  x="458.97" y="735.5" >start_secondary</text>
+</g>
+<g >
+<title>[dockerd-current] (28 samples, 0.01%)</title><rect x="10.2" y="709" width="0.1" height="15.0" fill="rgb(212,84,11)" rx="2" ry="2" />
+<text  x="13.22" y="719.5" ></text>
+</g>
+<g >
+<title>br_forward_finish (24 samples, 0.01%)</title><rect x="132.5" y="277" width="0.1" height="15.0" fill="rgb(215,56,44)" rx="2" ry="2" />
+<text  x="135.49" y="287.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (163 samples, 0.07%)</title><rect x="1178.3" y="149" width="0.8" height="15.0" fill="rgb(243,145,43)" rx="2" ry="2" />
+<text  x="1181.30" y="159.5" ></text>
+</g>
+<g >
+<title>tcp_v4_send_synack (171 samples, 0.07%)</title><rect x="447.4" y="437" width="0.8" height="15.0" fill="rgb(238,88,9)" rx="2" ry="2" />
+<text  x="450.43" y="447.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (69 samples, 0.03%)</title><rect x="447.6" y="373" width="0.3" height="15.0" fill="rgb(218,205,5)" rx="2" ry="2" />
+<text  x="450.57" y="383.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_state_process (446 samples, 0.18%)</title><rect x="446.2" y="485" width="2.1" height="15.0" fill="rgb(223,178,22)" rx="2" ry="2" />
+<text  x="449.18" y="495.5" ></text>
+</g>
+<g >
+<title>__softirqentry_text_start (490 samples, 0.20%)</title><rect x="1174.0" y="565" width="2.3" height="15.0" fill="rgb(245,90,31)" rx="2" ry="2" />
+<text  x="1177.01" y="575.5" ></text>
+</g>
+<g >
+<title>process_one_work (24 samples, 0.01%)</title><rect x="455.7" y="693" width="0.1" height="15.0" fill="rgb(216,18,3)" rx="2" ry="2" />
+<text  x="458.69" y="703.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (20,642 samples, 8.26%)</title><rect x="296.8" y="293" width="97.5" height="15.0" fill="rgb(210,60,3)" rx="2" ry="2" />
+<text  x="299.85" y="303.5" >sch_direct_..</text>
+</g>
+<g >
+<title>__dev_queue_xmit (10,333 samples, 4.14%)</title><rect x="394.4" y="309" width="48.8" height="15.0" fill="rgb(209,138,53)" rx="2" ry="2" />
+<text  x="397.41" y="319.5" >__de..</text>
+</g>
+<g >
+<title>security_netlbl_sid_to_secattr (34 samples, 0.01%)</title><rect x="153.2" y="293" width="0.2" height="15.0" fill="rgb(228,85,47)" rx="2" ry="2" />
+<text  x="156.19" y="303.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (23 samples, 0.01%)</title><rect x="1176.6" y="117" width="0.1" height="15.0" fill="rgb(207,1,29)" rx="2" ry="2" />
+<text  x="1179.56" y="127.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb (380 samples, 0.15%)</title><rect x="1177.3" y="517" width="1.8" height="15.0" fill="rgb(206,121,34)" rx="2" ry="2" />
+<text  x="1180.33" y="527.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (18,982 samples, 7.60%)</title><rect x="155.6" y="181" width="89.6" height="15.0" fill="rgb(243,46,4)" rx="2" ry="2" />
+<text  x="158.56" y="191.5" >sch_direct..</text>
+</g>
+<g >
+<title>__dev_queue_xmit (28 samples, 0.01%)</title><rect x="1176.8" y="133" width="0.2" height="15.0" fill="rgb(243,129,16)" rx="2" ry="2" />
+<text  x="1179.82" y="143.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (27 samples, 0.01%)</title><rect x="1174.0" y="197" width="0.2" height="15.0" fill="rgb(243,194,47)" rx="2" ry="2" />
+<text  x="1177.03" y="207.5" ></text>
+</g>
+<g >
+<title>do_idle (2,290 samples, 0.92%)</title><rect x="1179.2" y="629" width="10.8" height="15.0" fill="rgb(241,175,7)" rx="2" ry="2" />
+<text  x="1182.18" y="639.5" ></text>
+</g>
+<g >
+<title>ip_route_input_noref (39 samples, 0.02%)</title><rect x="443.9" y="421" width="0.2" height="15.0" fill="rgb(210,9,18)" rx="2" ry="2" />
+<text  x="446.90" y="431.5" ></text>
+</g>
+<g >
+<title>ip_route_output_key_hash_rcu (32 samples, 0.01%)</title><rect x="447.2" y="373" width="0.2" height="15.0" fill="rgb(233,61,23)" rx="2" ry="2" />
+<text  x="450.24" y="383.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (36 samples, 0.01%)</title><rect x="10.0" y="613" width="0.2" height="15.0" fill="rgb(244,210,52)" rx="2" ry="2" />
+<text  x="13.01" y="623.5" ></text>
+</g>
+<g >
+<title>get_unique_tuple (99 samples, 0.04%)</title><rect x="133.2" y="341" width="0.5" height="15.0" fill="rgb(239,89,8)" rx="2" ry="2" />
+<text  x="136.22" y="351.5" ></text>
+</g>
+<g >
+<title>ip_build_and_send_pkt (1,327 samples, 0.53%)</title><rect x="448.8" y="581" width="6.3" height="15.0" fill="rgb(229,65,19)" rx="2" ry="2" />
+<text  x="451.84" y="591.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (10,325 samples, 4.13%)</title><rect x="394.4" y="293" width="48.8" height="15.0" fill="rgb(223,21,30)" rx="2" ry="2" />
+<text  x="397.43" y="303.5" >__qd..</text>
+</g>
+<g >
+<title>ip_build_and_send_pkt (104 samples, 0.04%)</title><rect x="1176.8" y="245" width="0.5" height="15.0" fill="rgb(250,109,15)" rx="2" ry="2" />
+<text  x="1179.81" y="255.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (41 samples, 0.02%)</title><rect x="10.0" y="693" width="0.2" height="15.0" fill="rgb(217,133,22)" rx="2" ry="2" />
+<text  x="13.00" y="703.5" ></text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (29,220 samples, 11.69%)</title><rect x="152.5" y="421" width="138.0" height="15.0" fill="rgb(248,193,13)" rx="2" ry="2" />
+<text  x="155.49" y="431.5" >tcp_v4_do_rcv</text>
+</g>
+<g >
+<title>smpboot_thread_fn (94,183 samples, 37.70%)</title><rect x="10.5" y="709" width="444.8" height="15.0" fill="rgb(209,25,26)" rx="2" ry="2" />
+<text  x="13.48" y="719.5" >smpboot_thread_fn</text>
+</g>
+<g >
+<title>ip_local_deliver_finish (33,056 samples, 13.23%)</title><rect x="134.4" y="469" width="156.2" height="15.0" fill="rgb(207,118,0)" rx="2" ry="2" />
+<text  x="137.45" y="479.5" >ip_local_deliver_fin..</text>
+</g>
+<g >
+<title>__netif_receive_skb_list_core (44 samples, 0.02%)</title><rect x="1176.5" y="437" width="0.2" height="15.0" fill="rgb(215,168,22)" rx="2" ry="2" />
+<text  x="1179.54" y="447.5" ></text>
+</g>
+<g >
+<title>fib_validate_source (22 samples, 0.01%)</title><rect x="448.5" y="501" width="0.1" height="15.0" fill="rgb(233,167,50)" rx="2" ry="2" />
+<text  x="451.51" y="511.5" ></text>
+</g>
+<g >
+<title>drm_atomic_helper_commit (41 samples, 0.02%)</title><rect x="455.3" y="613" width="0.2" height="15.0" fill="rgb(218,79,24)" rx="2" ry="2" />
+<text  x="458.34" y="623.5" ></text>
+</g>
+<g >
+<title>napi_gro_receive (45 samples, 0.02%)</title><rect x="1176.5" y="501" width="0.2" height="15.0" fill="rgb(213,120,10)" rx="2" ry="2" />
+<text  x="1179.53" y="511.5" ></text>
+</g>
+<g >
+<title>nf_nat_inet_fn (33 samples, 0.01%)</title><rect x="152.3" y="245" width="0.1" height="15.0" fill="rgb(216,45,3)" rx="2" ry="2" />
+<text  x="155.26" y="255.5" ></text>
+</g>
+<g >
+<title>ip_output (87 samples, 0.03%)</title><rect x="447.5" y="389" width="0.5" height="15.0" fill="rgb(229,194,5)" rx="2" ry="2" />
+<text  x="450.54" y="399.5" ></text>
+</g>
+<g >
+<title>br_pass_frame_up (371 samples, 0.15%)</title><rect x="1177.3" y="437" width="1.8" height="15.0" fill="rgb(221,81,5)" rx="2" ry="2" />
+<text  x="1180.34" y="447.5" ></text>
+</g>
+<g >
+<title>tcp_check_req (3,673 samples, 1.47%)</title><rect x="135.1" y="421" width="17.4" height="15.0" fill="rgb(236,144,8)" rx="2" ry="2" />
+<text  x="138.12" y="431.5" ></text>
+</g>
+<g >
+<title>ret_from_fork (94,183 samples, 37.70%)</title><rect x="10.5" y="741" width="444.8" height="15.0" fill="rgb(247,212,38)" rx="2" ry="2" />
+<text  x="13.48" y="751.5" >ret_from_fork</text>
+</g>
+<g >
+<title>__ip_finish_output (64 samples, 0.03%)</title><rect x="447.6" y="357" width="0.3" height="15.0" fill="rgb(219,109,25)" rx="2" ry="2" />
+<text  x="450.57" y="367.5" ></text>
+</g>
+<g >
+<title>ip_route_input_noref (56 samples, 0.02%)</title><rect x="448.4" y="549" width="0.2" height="15.0" fill="rgb(227,4,23)" rx="2" ry="2" />
+<text  x="451.36" y="559.5" ></text>
+</g>
+<g >
+<title>ip_build_and_send_pkt (419 samples, 0.17%)</title><rect x="1174.3" y="469" width="1.9" height="15.0" fill="rgb(213,43,23)" rx="2" ry="2" />
+<text  x="1177.27" y="479.5" ></text>
+</g>
+<g >
+<title>__cookie_v4_init_sequence (22 samples, 0.01%)</title><rect x="446.4" y="421" width="0.1" height="15.0" fill="rgb(234,223,47)" rx="2" ry="2" />
+<text  x="449.43" y="431.5" ></text>
+</g>
+<g >
+<title>rh_timer_func (30 samples, 0.01%)</title><rect x="455.1" y="629" width="0.2" height="15.0" fill="rgb(247,32,51)" rx="2" ry="2" />
+<text  x="458.14" y="639.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (31,035 samples, 12.42%)</title><rect x="296.7" y="389" width="146.5" height="15.0" fill="rgb(214,64,32)" rx="2" ry="2" />
+<text  x="299.67" y="399.5" >ip_finish_output</text>
+</g>
+<g >
+<title>__inet_lookup_established (24 samples, 0.01%)</title><rect x="444.1" y="405" width="0.1" height="15.0" fill="rgb(240,187,7)" rx="2" ry="2" />
+<text  x="447.09" y="415.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (2,389 samples, 0.96%)</title><rect x="135.6" y="197" width="11.3" height="15.0" fill="rgb(211,151,35)" rx="2" ry="2" />
+<text  x="138.60" y="207.5" ></text>
+</g>
+<g >
+<title>tcp_v4_early_demux (25 samples, 0.01%)</title><rect x="444.1" y="421" width="0.1" height="15.0" fill="rgb(211,172,37)" rx="2" ry="2" />
+<text  x="447.08" y="431.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (20,659 samples, 8.27%)</title><rect x="296.8" y="325" width="97.6" height="15.0" fill="rgb(234,84,53)" rx="2" ry="2" />
+<text  x="299.79" y="335.5" >__dev_queue..</text>
+</g>
+<g >
+<title>ip_finish_output (382 samples, 0.15%)</title><rect x="130.9" y="437" width="1.8" height="15.0" fill="rgb(223,194,38)" rx="2" ry="2" />
+<text  x="133.91" y="447.5" ></text>
+</g>
+<g >
+<title>ip_protocol_deliver_rcu (109 samples, 0.04%)</title><rect x="1176.8" y="373" width="0.5" height="15.0" fill="rgb(222,40,19)" rx="2" ry="2" />
+<text  x="1179.79" y="383.5" ></text>
+</g>
+<g >
+<title>ip_route_output_flow (40 samples, 0.02%)</title><rect x="153.6" y="309" width="0.2" height="15.0" fill="rgb(230,49,23)" rx="2" ry="2" />
+<text  x="156.56" y="319.5" ></text>
+</g>
+<g >
+<title>dev_gro_receive (25 samples, 0.01%)</title><rect x="129.4" y="597" width="0.1" height="15.0" fill="rgb(215,114,34)" rx="2" ry="2" />
+<text  x="132.37" y="607.5" ></text>
+</g>
+<g >
+<title>nf_nat_inet_fn (117 samples, 0.05%)</title><rect x="294.9" y="437" width="0.6" height="15.0" fill="rgb(205,85,30)" rx="2" ry="2" />
+<text  x="297.95" y="447.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (83 samples, 0.03%)</title><rect x="131.5" y="261" width="0.3" height="15.0" fill="rgb(246,6,31)" rx="2" ry="2" />
+<text  x="134.46" y="271.5" ></text>
+</g>
+<g >
+<title>ip_protocol_deliver_rcu (514 samples, 0.21%)</title><rect x="445.9" y="533" width="2.4" height="15.0" fill="rgb(212,116,16)" rx="2" ry="2" />
+<text  x="448.90" y="543.5" ></text>
+</g>
+<g >
+<title>kworker/2:2-ata (24 samples, 0.01%)</title><rect x="455.7" y="757" width="0.1" height="15.0" fill="rgb(227,148,33)" rx="2" ry="2" />
+<text  x="458.69" y="767.5" ></text>
+</g>
+<g >
+<title>__dev_queue_xmit (55 samples, 0.02%)</title><rect x="132.4" y="357" width="0.3" height="15.0" fill="rgb(232,88,6)" rx="2" ry="2" />
+<text  x="135.44" y="367.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (23 samples, 0.01%)</title><rect x="1176.6" y="37" width="0.1" height="15.0" fill="rgb(211,145,23)" rx="2" ry="2" />
+<text  x="1179.56" y="47.5" ></text>
+</g>
+<g >
+<title>default_idle_call (153,124 samples, 61.29%)</title><rect x="456.0" y="677" width="723.2" height="15.0" fill="rgb(211,78,48)" rx="2" ry="2" />
+<text  x="458.99" y="687.5" >default_idle_call</text>
+</g>
+<g >
+<title>kworker/2:1H-kb (32 samples, 0.01%)</title><rect x="455.5" y="757" width="0.2" height="15.0" fill="rgb(229,160,13)" rx="2" ry="2" />
+<text  x="458.54" y="767.5" ></text>
+</g>
+<g >
+<title>nf_nat_inet_fn (143 samples, 0.06%)</title><rect x="133.1" y="389" width="0.7" height="15.0" fill="rgb(208,9,33)" rx="2" ry="2" />
+<text  x="136.12" y="399.5" ></text>
+</g>
+<g >
+<title>ebt_nat_out (22 samples, 0.01%)</title><rect x="132.1" y="277" width="0.1" height="15.0" fill="rgb(221,24,34)" rx="2" ry="2" />
+<text  x="135.08" y="287.5" ></text>
+</g>
+<g >
+<title>arch_cpu_idle (153,124 samples, 61.29%)</title><rect x="456.0" y="661" width="723.2" height="15.0" fill="rgb(216,205,17)" rx="2" ry="2" />
+<text  x="458.99" y="671.5" >arch_cpu_idle</text>
+</g>
+<g >
+<title>__ip_local_out (68 samples, 0.03%)</title><rect x="135.2" y="309" width="0.4" height="15.0" fill="rgb(213,225,41)" rx="2" ry="2" />
+<text  x="138.25" y="319.5" ></text>
+</g>
+<g >
+<title>start_kernel (2,290 samples, 0.92%)</title><rect x="1179.2" y="693" width="10.8" height="15.0" fill="rgb(209,146,16)" rx="2" ry="2" />
+<text  x="1182.18" y="703.5" ></text>
+</g>
+<g >
+<title>inet_csk_route_req (51 samples, 0.02%)</title><rect x="447.2" y="421" width="0.2" height="15.0" fill="rgb(224,79,48)" rx="2" ry="2" />
+<text  x="450.19" y="431.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_out (35 samples, 0.01%)</title><rect x="152.3" y="277" width="0.1" height="15.0" fill="rgb(226,110,41)" rx="2" ry="2" />
+<text  x="155.26" y="287.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (28 samples, 0.01%)</title><rect x="1176.8" y="69" width="0.2" height="15.0" fill="rgb(209,191,25)" rx="2" ry="2" />
+<text  x="1179.82" y="79.5" ></text>
+</g>
+<g >
+<title>ip_output (3,573 samples, 1.43%)</title><rect x="135.6" y="309" width="16.8" height="15.0" fill="rgb(233,55,6)" rx="2" ry="2" />
+<text  x="138.57" y="319.5" ></text>
+</g>
+<g >
+<title>__softirqentry_text_start (583 samples, 0.23%)</title><rect x="1176.4" y="565" width="2.8" height="15.0" fill="rgb(230,105,41)" rx="2" ry="2" />
+<text  x="1179.41" y="575.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (9,459 samples, 3.79%)</title><rect x="245.3" y="165" width="44.6" height="15.0" fill="rgb(248,205,30)" rx="2" ry="2" />
+<text  x="248.27" y="175.5" >sch_..</text>
+</g>
+<g >
+<title>iptable_nat_do_chain (78 samples, 0.03%)</title><rect x="295.1" y="421" width="0.4" height="15.0" fill="rgb(241,74,26)" rx="2" ry="2" />
+<text  x="298.09" y="431.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (33,032 samples, 13.22%)</title><rect x="134.5" y="437" width="156.0" height="15.0" fill="rgb(207,120,20)" rx="2" ry="2" />
+<text  x="137.53" y="447.5" >tcp_v4_rcv</text>
+</g>
+<g >
+<title>dev_hard_start_xmit (28 samples, 0.01%)</title><rect x="1176.8" y="85" width="0.2" height="15.0" fill="rgb(209,192,28)" rx="2" ry="2" />
+<text  x="1179.82" y="95.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (37 samples, 0.01%)</title><rect x="1176.6" y="165" width="0.1" height="15.0" fill="rgb(213,0,22)" rx="2" ry="2" />
+<text  x="1179.56" y="175.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (37 samples, 0.01%)</title><rect x="1174.0" y="501" width="0.2" height="15.0" fill="rgb(239,93,11)" rx="2" ry="2" />
+<text  x="1177.03" y="511.5" ></text>
+</g>
+<g >
+<title>br_netif_receive_skb (37 samples, 0.01%)</title><rect x="1174.0" y="421" width="0.2" height="15.0" fill="rgb(240,178,6)" rx="2" ry="2" />
+<text  x="1177.03" y="431.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (386 samples, 0.15%)</title><rect x="453.3" y="421" width="1.8" height="15.0" fill="rgb(227,108,51)" rx="2" ry="2" />
+<text  x="456.28" y="431.5" ></text>
+</g>
+<g >
+<title>tcp_v4_conn_request (29,182 samples, 11.68%)</title><rect x="152.6" y="373" width="137.8" height="15.0" fill="rgb(205,186,18)" rx="2" ry="2" />
+<text  x="155.62" y="383.5" >tcp_v4_conn_request</text>
+</g>
+<g >
+<title>dev_hard_start_xmit (2,388 samples, 0.96%)</title><rect x="135.6" y="181" width="11.3" height="15.0" fill="rgb(226,229,22)" rx="2" ry="2" />
+<text  x="138.60" y="191.5" ></text>
+</g>
+<g >
+<title>netif_receive_skb (371 samples, 0.15%)</title><rect x="1177.3" y="405" width="1.8" height="15.0" fill="rgb(243,196,20)" rx="2" ry="2" />
+<text  x="1180.34" y="415.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (414 samples, 0.17%)</title><rect x="1174.3" y="405" width="1.9" height="15.0" fill="rgb(211,104,8)" rx="2" ry="2" />
+<text  x="1177.29" y="415.5" ></text>
+</g>
+<g >
+<title>cpu_startup_entry (153,132 samples, 61.29%)</title><rect x="456.0" y="709" width="723.2" height="15.0" fill="rgb(240,184,17)" rx="2" ry="2" />
+<text  x="458.97" y="719.5" >cpu_startup_entry</text>
+</g>
+<g >
+<title>ip_route_output_flow (37 samples, 0.01%)</title><rect x="447.2" y="405" width="0.2" height="15.0" fill="rgb(216,68,19)" rx="2" ry="2" />
+<text  x="450.22" y="415.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (37 samples, 0.01%)</title><rect x="1174.0" y="373" width="0.2" height="15.0" fill="rgb(220,179,4)" rx="2" ry="2" />
+<text  x="1177.03" y="383.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit_nit (33 samples, 0.01%)</title><rect x="155.6" y="149" width="0.1" height="15.0" fill="rgb(212,19,47)" rx="2" ry="2" />
+<text  x="158.59" y="159.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (328 samples, 0.13%)</title><rect x="1174.7" y="373" width="1.5" height="15.0" fill="rgb(219,172,4)" rx="2" ry="2" />
+<text  x="1177.69" y="383.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (3,525 samples, 1.41%)</title><rect x="135.6" y="277" width="16.6" height="15.0" fill="rgb(206,73,5)" rx="2" ry="2" />
+<text  x="138.57" y="287.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (101 samples, 0.04%)</title><rect x="1176.8" y="165" width="0.5" height="15.0" fill="rgb(216,66,16)" rx="2" ry="2" />
+<text  x="1179.82" y="175.5" ></text>
+</g>
+<g >
+<title>tcp_make_synack (51 samples, 0.02%)</title><rect x="290.2" y="325" width="0.2" height="15.0" fill="rgb(224,81,23)" rx="2" ry="2" />
+<text  x="293.16" y="335.5" ></text>
+</g>
+<g >
+<title>tcp_v4_send_synack (104 samples, 0.04%)</title><rect x="1176.8" y="261" width="0.5" height="15.0" fill="rgb(245,17,14)" rx="2" ry="2" />
+<text  x="1179.81" y="271.5" ></text>
+</g>
+<g >
+<title>tcp_v4_send_ack (3,656 samples, 1.46%)</title><rect x="135.2" y="389" width="17.3" height="15.0" fill="rgb(235,118,43)" rx="2" ry="2" />
+<text  x="138.20" y="399.5" ></text>
+</g>
+<g >
+<title>tcp_v4_early_demux (26 samples, 0.01%)</title><rect x="448.6" y="549" width="0.2" height="15.0" fill="rgb(210,9,32)" rx="2" ry="2" />
+<text  x="451.63" y="559.5" ></text>
+</g>
+<g >
+<title>apic_timer_interrupt (490 samples, 0.20%)</title><rect x="1174.0" y="613" width="2.3" height="15.0" fill="rgb(248,225,10)" rx="2" ry="2" />
+<text  x="1177.01" y="623.5" ></text>
+</g>
+<g >
+<title>ipv4_conntrack_local (262 samples, 0.10%)</title><rect x="154.2" y="261" width="1.2" height="15.0" fill="rgb(248,62,52)" rx="2" ry="2" />
+<text  x="157.18" y="271.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (65 samples, 0.03%)</title><rect x="135.3" y="293" width="0.3" height="15.0" fill="rgb(230,186,21)" rx="2" ry="2" />
+<text  x="138.26" y="303.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (40 samples, 0.02%)</title><rect x="10.0" y="677" width="0.2" height="15.0" fill="rgb(212,96,12)" rx="2" ry="2" />
+<text  x="13.01" y="687.5" ></text>
+</g>
+<g >
+<title>vmw_framebuffer_bo_dirty_ext (42 samples, 0.02%)</title><rect x="455.3" y="661" width="0.2" height="15.0" fill="rgb(250,56,5)" rx="2" ry="2" />
+<text  x="458.34" y="671.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_in (259 samples, 0.10%)</title><rect x="154.2" y="245" width="1.2" height="15.0" fill="rgb(212,228,36)" rx="2" ry="2" />
+<text  x="157.19" y="255.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (41 samples, 0.02%)</title><rect x="10.0" y="709" width="0.2" height="15.0" fill="rgb(225,112,48)" rx="2" ry="2" />
+<text  x="13.00" y="719.5" ></text>
+</g>
+<g >
+<title>ip_local_out (3,641 samples, 1.46%)</title><rect x="135.2" y="325" width="17.2" height="15.0" fill="rgb(217,214,9)" rx="2" ry="2" />
+<text  x="138.25" y="335.5" ></text>
+</g>
+<g >
+<title>br_dev_queue_push_xmit (87 samples, 0.03%)</title><rect x="131.4" y="277" width="0.4" height="15.0" fill="rgb(227,193,47)" rx="2" ry="2" />
+<text  x="134.44" y="287.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (328 samples, 0.13%)</title><rect x="1174.7" y="309" width="1.5" height="15.0" fill="rgb(226,147,2)" rx="2" ry="2" />
+<text  x="1177.69" y="319.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (37 samples, 0.01%)</title><rect x="1176.6" y="149" width="0.1" height="15.0" fill="rgb(248,54,45)" rx="2" ry="2" />
+<text  x="1179.56" y="159.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (37 samples, 0.01%)</title><rect x="1176.6" y="133" width="0.1" height="15.0" fill="rgb(215,165,7)" rx="2" ry="2" />
+<text  x="1179.56" y="143.5" ></text>
+</g>
+<g >
+<title>[dockerd-current] (23 samples, 0.01%)</title><rect x="10.2" y="693" width="0.1" height="15.0" fill="rgb(232,71,1)" rx="2" ry="2" />
+<text  x="13.22" y="703.5" ></text>
+</g>
+<g >
+<title>ip_send_skb (3,641 samples, 1.46%)</title><rect x="135.2" y="341" width="17.2" height="15.0" fill="rgb(234,209,1)" rx="2" ry="2" />
+<text  x="138.25" y="351.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (367 samples, 0.15%)</title><rect x="1177.3" y="277" width="1.8" height="15.0" fill="rgb(233,174,37)" rx="2" ry="2" />
+<text  x="1180.34" y="287.5" ></text>
+</g>
+<g >
+<title>dev_hard_start_xmit (203 samples, 0.08%)</title><rect x="1177.3" y="165" width="1.0" height="15.0" fill="rgb(222,137,13)" rx="2" ry="2" />
+<text  x="1180.34" y="175.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (902 samples, 0.36%)</title><rect x="449.0" y="453" width="4.3" height="15.0" fill="rgb(229,161,11)" rx="2" ry="2" />
+<text  x="452.01" y="463.5" ></text>
+</g>
+<g >
+<title>do_idle (153,131 samples, 61.29%)</title><rect x="456.0" y="693" width="723.2" height="15.0" fill="rgb(221,180,28)" rx="2" ry="2" />
+<text  x="458.98" y="703.5" >do_idle</text>
+</g>
+<g >
+<title>process_one_work (32 samples, 0.01%)</title><rect x="455.5" y="693" width="0.2" height="15.0" fill="rgb(214,221,53)" rx="2" ry="2" />
+<text  x="458.54" y="703.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (28 samples, 0.01%)</title><rect x="1176.8" y="101" width="0.2" height="15.0" fill="rgb(215,184,34)" rx="2" ry="2" />
+<text  x="1179.82" y="111.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb (37 samples, 0.01%)</title><rect x="1174.0" y="517" width="0.2" height="15.0" fill="rgb(222,45,21)" rx="2" ry="2" />
+<text  x="1177.03" y="527.5" ></text>
+</g>
+<g >
+<title>iptable_filter_hook (32 samples, 0.01%)</title><rect x="134.0" y="453" width="0.2" height="15.0" fill="rgb(215,77,21)" rx="2" ry="2" />
+<text  x="137.00" y="463.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (56 samples, 0.02%)</title><rect x="447.6" y="341" width="0.3" height="15.0" fill="rgb(206,180,15)" rx="2" ry="2" />
+<text  x="450.59" y="351.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (203 samples, 0.08%)</title><rect x="1177.3" y="181" width="1.0" height="15.0" fill="rgb(239,96,46)" rx="2" ry="2" />
+<text  x="1180.34" y="191.5" ></text>
+</g>
+<g >
+<title>rest_init (2,290 samples, 0.92%)</title><rect x="1179.2" y="661" width="10.8" height="15.0" fill="rgb(237,3,15)" rx="2" ry="2" />
+<text  x="1182.18" y="671.5" ></text>
+</g>
+<g >
+<title>__inet_lookup_established (26 samples, 0.01%)</title><rect x="448.6" y="533" width="0.2" height="15.0" fill="rgb(213,225,28)" rx="2" ry="2" />
+<text  x="451.63" y="543.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (43 samples, 0.02%)</title><rect x="10.0" y="725" width="0.2" height="15.0" fill="rgb(223,68,1)" rx="2" ry="2" />
+<text  x="13.00" y="735.5" ></text>
+</g>
+<g >
+<title>ipt_do_table (106 samples, 0.04%)</title><rect x="291.2" y="453" width="0.5" height="15.0" fill="rgb(215,61,46)" rx="2" ry="2" />
+<text  x="294.23" y="463.5" ></text>
+</g>
+<g >
+<title>ip_build_and_send_pkt (111 samples, 0.04%)</title><rect x="447.4" y="421" width="0.6" height="15.0" fill="rgb(215,17,21)" rx="2" ry="2" />
+<text  x="450.44" y="431.5" ></text>
+</g>
+<g >
+<title>iptable_raw_hook (44 samples, 0.02%)</title><rect x="444.5" y="437" width="0.2" height="15.0" fill="rgb(237,10,14)" rx="2" ry="2" />
+<text  x="447.50" y="447.5" ></text>
+</g>
+<g >
+<title>ret_from_intr (583 samples, 0.23%)</title><rect x="1176.4" y="613" width="2.8" height="15.0" fill="rgb(234,32,23)" rx="2" ry="2" />
+<text  x="1179.41" y="623.5" ></text>
+</g>
+<g >
+<title>tcp_v4_reqsk_send_ack (3,657 samples, 1.46%)</title><rect x="135.2" y="405" width="17.3" height="15.0" fill="rgb(209,89,48)" rx="2" ry="2" />
+<text  x="138.20" y="415.5" ></text>
+</g>
+<g >
+<title>do_IRQ (583 samples, 0.23%)</title><rect x="1176.4" y="597" width="2.8" height="15.0" fill="rgb(253,50,25)" rx="2" ry="2" />
+<text  x="1179.41" y="607.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (2,394 samples, 0.96%)</title><rect x="135.6" y="245" width="11.3" height="15.0" fill="rgb(239,178,36)" rx="2" ry="2" />
+<text  x="138.58" y="255.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (43 samples, 0.02%)</title><rect x="1176.5" y="373" width="0.2" height="15.0" fill="rgb(208,75,20)" rx="2" ry="2" />
+<text  x="1179.54" y="383.5" ></text>
+</g>
+<g >
+<title>[dockerd-current] (28 samples, 0.01%)</title><rect x="10.2" y="741" width="0.1" height="15.0" fill="rgb(223,89,54)" rx="2" ry="2" />
+<text  x="13.22" y="751.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb (32,336 samples, 12.94%)</title><rect x="296.0" y="629" width="152.8" height="15.0" fill="rgb(205,58,34)" rx="2" ry="2" />
+<text  x="299.04" y="639.5" >__netif_receive_skb</text>
+</g>
+<g >
+<title>e1000_unmap_and_free_tx_resource.isra.54 (64 samples, 0.03%)</title><rect x="295.6" y="629" width="0.3" height="15.0" fill="rgb(246,229,29)" rx="2" ry="2" />
+<text  x="298.57" y="639.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (28,475 samples, 11.40%)</title><rect x="155.5" y="245" width="134.5" height="15.0" fill="rgb(228,151,14)" rx="2" ry="2" />
+<text  x="158.48" y="255.5" >ip_finish_output2</text>
+</g>
+<g >
+<title>__nf_conntrack_confirm (34 samples, 0.01%)</title><rect x="132.9" y="389" width="0.2" height="15.0" fill="rgb(219,120,16)" rx="2" ry="2" />
+<text  x="135.91" y="399.5" ></text>
+</g>
+<g >
+<title>__nf_conntrack_find_get (26 samples, 0.01%)</title><rect x="135.3" y="245" width="0.1" height="15.0" fill="rgb(232,75,29)" rx="2" ry="2" />
+<text  x="138.30" y="255.5" ></text>
+</g>
+<g >
+<title>ip_forward (37 samples, 0.01%)</title><rect x="1174.0" y="325" width="0.2" height="15.0" fill="rgb(252,14,47)" rx="2" ry="2" />
+<text  x="1177.03" y="335.5" ></text>
+</g>
+<g >
+<title>ebt_in_hook (22 samples, 0.01%)</title><rect x="445.4" y="517" width="0.1" height="15.0" fill="rgb(229,52,52)" rx="2" ry="2" />
+<text  x="448.37" y="527.5" ></text>
+</g>
+<g >
+<title>ip_output (37 samples, 0.01%)</title><rect x="1176.6" y="181" width="0.1" height="15.0" fill="rgb(239,219,6)" rx="2" ry="2" />
+<text  x="1179.56" y="191.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (79 samples, 0.03%)</title><rect x="134.0" y="469" width="0.4" height="15.0" fill="rgb(246,214,4)" rx="2" ry="2" />
+<text  x="136.98" y="479.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (101 samples, 0.04%)</title><rect x="1176.8" y="197" width="0.5" height="15.0" fill="rgb(230,106,12)" rx="2" ry="2" />
+<text  x="1179.82" y="207.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (387 samples, 0.15%)</title><rect x="453.3" y="469" width="1.8" height="15.0" fill="rgb(246,47,21)" rx="2" ry="2" />
+<text  x="456.28" y="479.5" ></text>
+</g>
+<g >
+<title>tcp_v4_conn_request (408 samples, 0.16%)</title><rect x="446.4" y="469" width="1.9" height="15.0" fill="rgb(240,60,47)" rx="2" ry="2" />
+<text  x="449.36" y="479.5" ></text>
+</g>
+<g >
+<title>__inet_lookup_established (24 samples, 0.01%)</title><rect x="134.7" y="421" width="0.1" height="15.0" fill="rgb(226,8,7)" rx="2" ry="2" />
+<text  x="137.67" y="431.5" ></text>
+</g>
+<g >
+<title>br_handle_frame (31,659 samples, 12.67%)</title><rect x="296.2" y="581" width="149.5" height="15.0" fill="rgb(226,136,44)" rx="2" ry="2" />
+<text  x="299.21" y="591.5" >br_handle_frame</text>
+</g>
+<g >
+<title>ip_rcv_finish (31,267 samples, 12.51%)</title><rect x="296.5" y="453" width="147.7" height="15.0" fill="rgb(232,59,18)" rx="2" ry="2" />
+<text  x="299.54" y="463.5" >ip_rcv_finish</text>
+</g>
+<g >
+<title>skb_release_all (45 samples, 0.02%)</title><rect x="295.7" y="581" width="0.2" height="15.0" fill="rgb(215,153,47)" rx="2" ry="2" />
+<text  x="298.65" y="591.5" ></text>
+</g>
+<g >
+<title>br_forward (44 samples, 0.02%)</title><rect x="132.5" y="309" width="0.2" height="15.0" fill="rgb(254,216,15)" rx="2" ry="2" />
+<text  x="135.48" y="319.5" ></text>
+</g>
+<g >
+<title>netif_receive_skb_list_internal (123 samples, 0.05%)</title><rect x="1176.7" y="485" width="0.6" height="15.0" fill="rgb(208,202,40)" rx="2" ry="2" />
+<text  x="1179.75" y="495.5" ></text>
+</g>
+<g >
+<title>blk_mq_sched_dispatch_requests (32 samples, 0.01%)</title><rect x="455.5" y="645" width="0.2" height="15.0" fill="rgb(234,78,54)" rx="2" ry="2" />
+<text  x="458.54" y="655.5" ></text>
+</g>
+<g >
+<title>process_one_work (43 samples, 0.02%)</title><rect x="455.3" y="693" width="0.2" height="15.0" fill="rgb(251,130,19)" rx="2" ry="2" />
+<text  x="458.33" y="703.5" ></text>
+</g>
+<g >
+<title>vmw_cmdbuf_man_process (39 samples, 0.02%)</title><rect x="455.3" y="405" width="0.2" height="15.0" fill="rgb(222,117,25)" rx="2" ry="2" />
+<text  x="458.35" y="415.5" ></text>
+</g>
+<g >
+<title>vmw_execbuf_fence_commands (39 samples, 0.02%)</title><rect x="455.3" y="485" width="0.2" height="15.0" fill="rgb(208,36,35)" rx="2" ry="2" />
+<text  x="458.35" y="495.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (31,030 samples, 12.42%)</title><rect x="296.7" y="373" width="146.5" height="15.0" fill="rgb(247,185,26)" rx="2" ry="2" />
+<text  x="299.69" y="383.5" >__ip_finish_output</text>
+</g>
+<g >
+<title>dev_queue_xmit (163 samples, 0.07%)</title><rect x="1178.3" y="213" width="0.8" height="15.0" fill="rgb(214,174,31)" rx="2" ry="2" />
+<text  x="1181.30" y="223.5" ></text>
+</g>
+<g >
+<title>x86_64_start_kernel (2,290 samples, 0.92%)</title><rect x="1179.2" y="725" width="10.8" height="15.0" fill="rgb(235,129,50)" rx="2" ry="2" />
+<text  x="1182.18" y="735.5" ></text>
+</g>
+<g >
+<title>ip_protocol_deliver_rcu (43 samples, 0.02%)</title><rect x="1176.5" y="341" width="0.2" height="15.0" fill="rgb(221,67,4)" rx="2" ry="2" />
+<text  x="1179.54" y="351.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (367 samples, 0.15%)</title><rect x="1177.3" y="261" width="1.8" height="15.0" fill="rgb(221,172,29)" rx="2" ry="2" />
+<text  x="1180.34" y="271.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (32 samples, 0.01%)</title><rect x="10.0" y="549" width="0.2" height="15.0" fill="rgb(252,66,33)" rx="2" ry="2" />
+<text  x="13.01" y="559.5" ></text>
+</g>
+<g >
+<title>selinux_netlbl_inet_conn_request (75 samples, 0.03%)</title><rect x="446.7" y="405" width="0.4" height="15.0" fill="rgb(242,14,15)" rx="2" ry="2" />
+<text  x="449.70" y="415.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit_nit (32 samples, 0.01%)</title><rect x="296.9" y="261" width="0.1" height="15.0" fill="rgb(231,193,21)" rx="2" ry="2" />
+<text  x="299.87" y="271.5" ></text>
+</g>
+<g >
+<title>iptable_mangle_hook (107 samples, 0.04%)</title><rect x="291.2" y="469" width="0.5" height="15.0" fill="rgb(216,63,5)" rx="2" ry="2" />
+<text  x="294.23" y="479.5" ></text>
+</g>
+<g >
+<title>e1000_xmit_frame (1,121 samples, 0.45%)</title><rect x="146.9" y="149" width="5.3" height="15.0" fill="rgb(248,178,50)" rx="2" ry="2" />
+<text  x="149.89" y="159.5" ></text>
+</g>
+<g >
+<title>ip_list_rcv (35,078 samples, 14.04%)</title><rect x="129.9" y="533" width="165.6" height="15.0" fill="rgb(207,123,36)" rx="2" ry="2" />
+<text  x="132.87" y="543.5" >ip_list_rcv</text>
+</g>
+<g >
+<title>__dev_queue_xmit (278 samples, 0.11%)</title><rect x="131.1" y="373" width="1.3" height="15.0" fill="rgb(231,227,50)" rx="2" ry="2" />
+<text  x="134.11" y="383.5" ></text>
+</g>
+<g >
+<title>vmw_fifo_send_fence (39 samples, 0.02%)</title><rect x="455.3" y="469" width="0.2" height="15.0" fill="rgb(230,76,20)" rx="2" ry="2" />
+<text  x="458.35" y="479.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (39 samples, 0.02%)</title><rect x="10.0" y="629" width="0.2" height="15.0" fill="rgb(247,111,40)" rx="2" ry="2" />
+<text  x="13.01" y="639.5" ></text>
+</g>
+<g >
+<title>vmw_cmdbuf_ctx_process (39 samples, 0.02%)</title><rect x="455.3" y="389" width="0.2" height="15.0" fill="rgb(242,78,5)" rx="2" ry="2" />
+<text  x="458.35" y="399.5" ></text>
+</g>
+<g >
+<title>ip_route_input_rcu (56 samples, 0.02%)</title><rect x="448.4" y="533" width="0.2" height="15.0" fill="rgb(225,65,33)" rx="2" ry="2" />
+<text  x="451.36" y="543.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (278 samples, 0.11%)</title><rect x="131.1" y="389" width="1.3" height="15.0" fill="rgb(208,53,36)" rx="2" ry="2" />
+<text  x="134.11" y="399.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish_core.isra.20 (69 samples, 0.03%)</title><rect x="443.9" y="437" width="0.3" height="15.0" fill="rgb(238,215,24)" rx="2" ry="2" />
+<text  x="446.88" y="447.5" ></text>
+</g>
+<g >
+<title>[docker-containerd-current] (32 samples, 0.01%)</title><rect x="10.0" y="565" width="0.2" height="15.0" fill="rgb(233,144,25)" rx="2" ry="2" />
+<text  x="13.01" y="575.5" ></text>
+</g>
+<g >
+<title>ip_forward (766 samples, 0.31%)</title><rect x="130.8" y="485" width="3.6" height="15.0" fill="rgb(247,32,45)" rx="2" ry="2" />
+<text  x="133.76" y="495.5" ></text>
+</g>
+<g >
+<title>neigh_resolve_output (1,127 samples, 0.45%)</title><rect x="146.9" y="245" width="5.3" height="15.0" fill="rgb(209,228,6)" rx="2" ry="2" />
+<text  x="149.89" y="255.5" ></text>
+</g>
+<g >
+<title>ip_local_out (419 samples, 0.17%)</title><rect x="1174.3" y="453" width="1.9" height="15.0" fill="rgb(244,68,25)" rx="2" ry="2" />
+<text  x="1177.27" y="463.5" ></text>
+</g>
+<g >
+<title>__ip_local_out (343 samples, 0.14%)</title><rect x="153.8" y="293" width="1.6" height="15.0" fill="rgb(218,177,7)" rx="2" ry="2" />
+<text  x="156.81" y="303.5" ></text>
+</g>
+<g >
+<title>dev_queue_xmit (55 samples, 0.02%)</title><rect x="132.4" y="373" width="0.3" height="15.0" fill="rgb(221,187,20)" rx="2" ry="2" />
+<text  x="135.44" y="383.5" ></text>
+</g>
+<g >
+<title>__qdisc_run (9,462 samples, 3.79%)</title><rect x="245.3" y="181" width="44.6" height="15.0" fill="rgb(246,62,21)" rx="2" ry="2" />
+<text  x="248.25" y="191.5" >__qd..</text>
+</g>
+<g >
+<title>tcp_conn_request (38 samples, 0.02%)</title><rect x="1176.6" y="245" width="0.1" height="15.0" fill="rgb(206,223,42)" rx="2" ry="2" />
+<text  x="1179.56" y="255.5" ></text>
+</g>
+<g >
+<title>nf_conntrack_free (26 samples, 0.01%)</title><rect x="294.3" y="405" width="0.2" height="15.0" fill="rgb(208,38,53)" rx="2" ry="2" />
+<text  x="297.34" y="415.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (1,295 samples, 0.52%)</title><rect x="449.0" y="517" width="6.1" height="15.0" fill="rgb(242,128,3)" rx="2" ry="2" />
+<text  x="451.99" y="527.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (900 samples, 0.36%)</title><rect x="449.0" y="437" width="4.3" height="15.0" fill="rgb(235,84,8)" rx="2" ry="2" />
+<text  x="452.02" y="447.5" ></text>
+</g>
+<g >
+<title>ip_route_input_slow (50 samples, 0.02%)</title><rect x="448.4" y="517" width="0.2" height="15.0" fill="rgb(246,68,8)" rx="2" ry="2" />
+<text  x="451.38" y="527.5" ></text>
+</g>
+<g >
+<title>sch_direct_xmit (163 samples, 0.07%)</title><rect x="1178.3" y="165" width="0.8" height="15.0" fill="rgb(248,83,8)" rx="2" ry="2" />
+<text  x="1181.30" y="175.5" ></text>
+</g>
+<g >
+<title>__blk_mq_run_hw_queue (32 samples, 0.01%)</title><rect x="455.5" y="661" width="0.2" height="15.0" fill="rgb(233,123,31)" rx="2" ry="2" />
+<text  x="458.54" y="671.5" ></text>
+</g>
+</g>
+</svg>
